@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>幻卡卡面模板抓取工具</title>
+<style>
+  body { font-family: system-ui, 'Noto Serif TC', serif; background: #1a1a1c; color: #e8e0cc; max-width: 860px; margin: 24px auto; padding: 0 16px; }
+  h1 { color: #d9b449; font-size: 20px; }
+  button { background: #2b2b2e; color: #d9b449; border: 1px solid #8a7740; border-radius: 8px; padding: 10px 16px; font-size: 14px; cursor: pointer; margin: 4px 8px 4px 0; }
+  button:disabled { opacity: .4; cursor: default; }
+  input[type=text] { background: #242427; color: #e8e0cc; border: 1px solid #555; border-radius: 6px; padding: 8px; width: 240px; }
+  #log { background: #242427; border: 1px solid #444; border-radius: 8px; padding: 10px; height: 220px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; margin-top: 12px; }
+  #bar { height: 10px; background: #333; border-radius: 5px; margin: 10px 0; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: #d9b449; transition: width .1s; }
+  #preview { margin-top: 12px; max-width: 100%; image-rendering: pixelated; border: 1px solid #444; }
+  .hint { font-size: 13px; color: #aaa; line-height: 1.7; }
+</style>
+</head>
+<body>
+<h1>幻卡卡面模板抓取工具</h1>
+<p class="hint">
+  流程：<b>① 抓取並打包</b> → 從 FFXIV Collect API 取得全卡清單、逐張下載卡圖、灰階縮放進雪碧圖 →
+  <b>② 下載 templates.png 與 templates.json</b>，放進分析台專案的 <code>public/templates/</code>。<br>
+  若卡圖因 CORS 無法用網路模式取得（記錄會顯示紅字），改用「本機檔案模式」：先以其他方式把卡圖存到本機資料夾
+  （檔名須為 <code>{id}.png</code>），再用檔案選取器一次選入全部。<br>
+  批次下載法：按「下載網址清單」取得 <code>urls.txt</code>，在同資料夾執行 PowerShell：<br>
+  <code>Get-Content urls.txt | ForEach-Object { $p = $_ -split ' ', 2; Invoke-WebRequest $p[1] -OutFile "$($p[0]).png"; Start-Sleep -m 100 }</code><br>
+  <b>注意：不要用 file:// 直接開這個檔</b>（跨域請求會被擋，出現 Failed to fetch）。
+  請放進專案 <code>public/</code>，以 <code>npm run dev</code> 後開
+  <code>http://localhost:5173/fetch-templates.html</code>。<br>
+  若 API 清單仍抓不到，可改貼 id 清單（從 cards-data.ts 取，在專案目錄的瀏覽器 console 或 node 執行：
+  <code>CARD_POOL.map(c =&gt; c.id).join(',')</code>），工具會用固定網址格式
+  <code>ffxivcollect.com/images/cards/large/{id}.png</code> 直接抓圖。
+</p>
+
+<div>
+  <button id="btnFetch">① 抓取並打包（網路模式）</button>
+  <button id="btnPng" disabled>② 下載 templates.png</button>
+  <button id="btnJson" disabled>② 下載 templates.json</button>
+</div>
+<div>
+  本機檔案模式：<input type="file" id="filePick" multiple accept="image/*">
+</div>
+<div style="margin-top:8px">
+  id 清單模式（免 API）：<input type="text" id="idList" placeholder="貼上逗號分隔的全卡 id">
+  <button id="btnIdList">用 id 清單抓取並打包</button>
+</div>
+<div style="margin-top:8px">
+  原圖樣本下載（驗證渲染一致性用，逗號分隔卡片 id）：
+  <input type="text" id="sampleIds" placeholder="例如 21,207,105">
+  <button id="btnSamples">下載原圖樣本</button>
+  <button id="btnUrls">下載網址清單（備援批次下載用）</button>
+</div>
+
+<div id="bar"><div id="fill"></div></div>
+<div id="log"></div>
+<canvas id="preview"></canvas>
+
+<script>
+// ====== 設定 ======
+// 圖源：FFXIV Collect（triad.raelys.com 已停止維護且部分地區連不上）
+// 端點與圖片路徑格式皆經原始碼查證（mattantonelli/ffxiv-collect）
+const API_URL = 'https://ffxivcollect.com/api/triad/cards';
+const IMAGE_URL = (id) => `https://ffxivcollect.com/images/cards/large/${id}.png`;
+const TILE_W = 64, TILE_H = 80;   // 模板尺寸（灰階、aspect-fit 置中）
+const COLS = 20;                   // 雪碧圖每列 20 格
+const DELAY_MS = 80;               // 每張間隔，禮貌性節流
+
+const log = (msg, err) => {
+  const el = document.getElementById('log');
+  el.innerHTML += (err ? '<span style="color:#e07060">' + msg + '</span>' : msg) + '\n';
+  el.scrollTop = el.scrollHeight;
+};
+const setBar = (r) => document.getElementById('fill').style.width = (r * 100).toFixed(1) + '%';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let cards = [];        // API 卡片清單（依 id 排序）
+let sheetCanvas = null;
+let meta = null;
+
+async function fetchCardList() {
+  log('抓取卡片清單…');
+  const res = await fetch(API_URL + '?limit=1000');
+  const json = await res.json();
+  const list = json.results ?? json.cards ?? json;
+  if (!Array.isArray(list)) throw new Error('無法解析 API 回應，請檢查 API_URL 與回應格式');
+  cards = list.slice().sort((a, b) => a.id - b.id);
+  if (json.count && json.count !== cards.length) {
+    log(`警告：API 宣告 ${json.count} 張但只取得 ${cards.length} 張（可能有分頁），請檢查`, true);
+  }
+  log(`取得 ${cards.length} 張卡`);
+}
+
+// 載入單張卡圖：先試 <img crossOrigin>，失敗再試 fetch blob
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = async () => {
+      try {
+        const res = await fetch(url, { mode: 'cors' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        const img2 = new Image();
+        img2.onload = () => { URL.revokeObjectURL(img2.src); resolve(img2); };
+        img2.onerror = () => reject(new Error('blob 解碼失敗'));
+        img2.src = URL.createObjectURL(blob);
+      } catch (e) { reject(e); }
+    };
+    img.src = url;
+  });
+}
+
+function initSheet(n) {
+  const rows = Math.ceil(n / COLS);
+  sheetCanvas = document.createElement('canvas');
+  sheetCanvas.width = COLS * TILE_W;
+  sheetCanvas.height = rows * TILE_H;
+  const ctx = sheetCanvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, sheetCanvas.width, sheetCanvas.height);
+  return ctx;
+}
+
+function drawTile(ctx, img, index) {
+  const col = index % COLS, row = Math.floor(index / COLS);
+  // aspect-fit 置中
+  const s = Math.min(TILE_W / img.width, TILE_H / img.height);
+  const w = img.width * s, h = img.height * s;
+  ctx.drawImage(img, col * TILE_W + (TILE_W - w) / 2, row * TILE_H + (TILE_H - h) / 2, w, h);
+}
+
+function grayscaleSheet() {
+  const ctx = sheetCanvas.getContext('2d');
+  const d = ctx.getImageData(0, 0, sheetCanvas.width, sheetCanvas.height);
+  const p = d.data;
+  for (let i = 0; i < p.length; i += 4) {
+    const y = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+    p[i] = p[i + 1] = p[i + 2] = y;
+  }
+  ctx.putImageData(d, 0, 0);
+}
+
+async function buildFromNetwork() {
+  document.getElementById('btnFetch').disabled = true;
+  try {
+    await fetchCardList();
+    const ctx = initSheet(cards.length);
+    meta = { generatedAt: new Date().toISOString(), tileW: TILE_W, tileH: TILE_H, cols: COLS, cards: [] };
+    let fail = 0;
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      const url = c.image || c.icon;
+      let ok = false, size = null;
+      if (url) {
+        try {
+          const img = await loadImage(url);
+          drawTile(ctx, img, i);
+          size = [img.width, img.height];
+          ok = true;
+        } catch (e) {
+          fail++;
+          log(`id=${c.id} ${c.name ?? ''} 圖片載入失敗: ${e.message}`, true);
+        }
+      } else {
+        fail++;
+        log(`id=${c.id} 無 image 欄位`, true);
+      }
+      meta.cards.push({ id: c.id, name: c.name ?? '', ok, size });
+      setBar((i + 1) / cards.length);
+      if (i % 20 === 0) log(`進度 ${i + 1}/${cards.length}`);
+      await sleep(DELAY_MS);
+    }
+    grayscaleSheet();
+    finishSheet(fail);
+  } catch (e) {
+    log('失敗: ' + e.message, true);
+    log('若為 CORS 問題，改用本機檔案模式（見頁首說明）', true);
+    document.getElementById('btnFetch').disabled = false;
+  }
+}
+
+// 本機檔案模式：選入 {id}.png 檔案（仍需先抓 API 清單以取得 id 順序）
+async function buildFromFiles(files) {
+  try {
+    const byId = new Map();
+    for (const f of files) {
+      const m = f.name.match(/^(\d+)\./);
+      if (m) byId.set(Number(m[1]), f);
+    }
+    log(`本機檔案 ${byId.size} 張`);
+    if (cards.length === 0) {
+      // API 清單抓不到時（CORS/網路被擋），直接用檔名的 id 建清單，
+      // 順序＝id 升冪，與分析台 cards-data 的 id 對應。
+      try { await fetchCardList(); }
+      catch (e) {
+        cards = [...byId.keys()].sort((a, b) => a - b).map((id) => ({ id, name: '' }));
+        log(`API 不可用（${e.message}），改以檔名建立清單：${cards.length} 張`);
+      }
+    }
+    const ctx = initSheet(cards.length);
+    meta = { generatedAt: new Date().toISOString(), tileW: TILE_W, tileH: TILE_H, cols: COLS, cards: [] };
+    let fail = 0;
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      const f = byId.get(c.id);
+      let ok = false, size = null;
+      if (f) {
+        const img = await createImageBitmap(f);
+        drawTile(ctx, img, i);
+        size = [img.width, img.height];
+        ok = true;
+      } else { fail++; log(`id=${c.id} 缺檔`, true); }
+      meta.cards.push({ id: c.id, name: c.name ?? '', ok, size });
+      setBar((i + 1) / cards.length);
+    }
+    grayscaleSheet();
+    finishSheet(fail);
+  } catch (e) { log('失敗: ' + e.message, true); }
+}
+
+function finishSheet(fail) {
+  log(`完成：${cards.length - fail}/${cards.length} 張成功` + (fail ? `，${fail} 張失敗（見上方紅字）` : ''));
+  const pv = document.getElementById('preview');
+  pv.width = sheetCanvas.width; pv.height = sheetCanvas.height;
+  pv.getContext('2d').drawImage(sheetCanvas, 0, 0);
+  document.getElementById('btnPng').disabled = false;
+  document.getElementById('btnJson').disabled = false;
+}
+
+function download(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// 匯出 urls.txt：每行「id 網址」，供命令列批次下載（無 CORS 限制）
+document.getElementById('btnUrls').onclick = async () => {
+  try {
+    if (cards.length === 0) await fetchCardList();
+    const lines = cards.map((c) => `${c.id} ${c.image || c.icon || ''}`).join('\n');
+    download('urls.txt', new Blob([lines], { type: 'text/plain' }));
+    log('urls.txt 已下載，批次抓圖指令見工具說明');
+  } catch (e) { log('失敗: ' + e.message, true); }
+};
+
+// id 清單模式：不打 API，直接用固定網址格式
+document.getElementById('btnIdList').onclick = () => {
+  const ids = document.getElementById('idList').value.split(',').map((s) => Number(s.trim())).filter(Boolean);
+  if (ids.length === 0) { log('請先貼上 id 清單', true); return; }
+  cards = ids.sort((a, b) => a - b).map((id) => ({ id, name: '', image: IMAGE_URL(id) }));
+  log(`id 清單模式：${cards.length} 張`);
+  buildFromNetworkList();
+};
+
+async function buildFromNetworkList() {
+  const ctx = initSheet(cards.length);
+  meta = { generatedAt: new Date().toISOString(), tileW: TILE_W, tileH: TILE_H, cols: COLS, cards: [] };
+  let fail = 0;
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i];
+    let ok = false, size = null;
+    try {
+      const img = await loadImage(c.image);
+      drawTile(ctx, img, i);
+      size = [img.width, img.height];
+      ok = true;
+    } catch (e) { fail++; log(`id=${c.id} 圖片載入失敗: ${e.message}`, true); }
+    meta.cards.push({ id: c.id, name: c.name ?? '', ok, size });
+    setBar((i + 1) / cards.length);
+    if (i % 20 === 0) log(`進度 ${i + 1}/${cards.length}`);
+    await sleep(DELAY_MS);
+  }
+  grayscaleSheet();
+  finishSheet(fail);
+}
+
+document.getElementById('btnFetch').onclick = buildFromNetwork;
+document.getElementById('filePick').onchange = (e) => buildFromFiles([...e.target.files]);
+document.getElementById('btnPng').onclick = () => sheetCanvas.toBlob((b) => download('templates.png', b), 'image/png');
+document.getElementById('btnJson').onclick = () =>
+  download('templates.json', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+
+// 原圖樣本下載（驗證 FFXIV Collect 渲染 vs 遊戲內渲染用）
+document.getElementById('btnSamples').onclick = async () => {
+  try {
+    if (cards.length === 0) await fetchCardList();
+    const ids = document.getElementById('sampleIds').value.split(',').map((s) => Number(s.trim())).filter(Boolean);
+    for (const id of ids) {
+      const c = cards.find((x) => x.id === id);
+      if (!c || !(c.image || c.icon)) { log(`樣本 id=${id} 找不到或無圖`, true); continue; }
+      const res = await fetch(c.image || c.icon, { mode: 'cors' });
+      download(`${id}.png`, await res.blob());
+      log(`樣本 id=${id} 已下載`);
+      await sleep(300);
+    }
+  } catch (e) { log('樣本下載失敗: ' + e.message + '（可改手動另存圖片網址）', true); }
+};
+</script>
+</body>
+</html>
