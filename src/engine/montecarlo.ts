@@ -18,7 +18,11 @@
 //     搜尋端的走法去重（minimax 改法 A）讓多張同內容估計卡只展開一次，
 //     此情境下實測快約 7 倍，深盤面反而是估計卡最高效的地方。
 //
-//   【exact 精確】無未知卡時：直接 findBestMove，結果與原流程完全一致。
+//   【exact 精確】無未知卡時：精確搜尋。
+//
+//   exact 與 estimate 模式在根節點同分時，以「對手犯錯空間」決勝
+//   （minimax.ts 的 findBestMoveTieBreak），不再由手牌排列順序決定。
+//   分數與 findBestMove 相同，只有同分時的著手選擇不同。
 //
 // 成本實測基準（本次開發環境，空格數 → 每樣本全根評分耗時）：
 //   ≤6: <20ms ／ 7: ~170ms ／ 8: ~950ms ／ 9: ~13000ms
@@ -29,7 +33,7 @@
 // ============================================================
 
 import { applyMove, getLegalMoves, isGameOver } from './game'
-import { evaluateState, findBestMove, findBestMoveForCard } from './minimax'
+import { evaluateState, findBestMoveTieBreak } from './minimax'
 import { makeEstimateCard } from './card-pool'
 import { createOpponentModel } from './opponent-model'
 import type { OpponentModel, OpponentModelSpec } from './opponent-model'
@@ -71,11 +75,9 @@ export interface MonteCarloOptions {
   opponent?: OpponentModelSpec
 }
 
-// 精確搜尋（依混亂限制選入口）。exact 與 estimate 模式共用。
+// 精確搜尋（含根節點同分決勝；混亂規則只算指定牌）。exact 與 estimate 模式共用。
 function exactSearch(state: GameState, restrictToCardId?: number) {
-  return restrictToCardId !== undefined
-    ? findBestMoveForCard(state, restrictToCardId)
-    : findBestMove(state)
+  return findBestMoveTieBreak(state, restrictToCardId)
 }
 
 // ---------- 主入口 ----------

@@ -8,7 +8,13 @@
 import { describe, expect, it } from 'vitest'
 import { CARD_POOL, makeEstimateCard } from './card-pool'
 import { applyMove, getLegalMoves, isGameOver } from './game'
-import { evaluateState, findBestMove, findBestMoveForCard } from './minimax'
+import {
+  dedupMoves,
+  evaluateState,
+  findBestMove,
+  findBestMoveForCard,
+  findBestMoveTieBreak,
+} from './minimax'
 import { findBestMoveMonteCarlo } from './montecarlo'
 import type { Card, GameState, Rules } from './types'
 
@@ -144,6 +150,55 @@ describe('minimax 走法去重（改法 A）', () => {
       const ref = s.turn === 'RED' ? Math.max(...refs) : Math.min(...refs)
       expect(findBestMoveForCard(s, cid).score).toBe(ref)
     }
+  })
+})
+
+describe('根節點同分決勝（對手犯錯空間）', () => {
+  it('分數 = findBestMove / findBestMoveForCard，且建議著手確實達到最優值', () => {
+    for (let t = 0; t < 40; t++) {
+      const s = randomState(0.3, 3 + ri(3))
+      if (isGameOver(s)) continue
+      const tb = findBestMoveTieBreak(s)
+      expect(tb.score).toBe(findBestMove(s).score)
+      expect(evaluateState(applyMove(s, tb.move!))).toBe(tb.score)
+
+      // 從合法手挑牌（秩序規則下只有第一張能出）。
+      const legal = getLegalMoves(s)
+      const cid = legal[ri(legal.length)]!.cardId
+      const tc = findBestMoveForCard(s, cid)
+      const tbc = findBestMoveTieBreak(s, cid)
+      expect(tbc.score).toBe(tc.score)
+      expect(tbc.move!.cardId).toBe(cid)
+      expect(evaluateState(applyMove(s, tbc.move!))).toBe(tc.score)
+    }
+  })
+
+  it('選的是同分著手中「對手失手回應」最多者，並列取第一個（參考實作對照）', () => {
+    let tiedCases = 0
+    for (let t = 0; t < 60; t++) {
+      const s = randomState(0, 5)
+      if (isGameOver(s)) continue
+      const v = findBestMove(s).score
+      const isMax = s.turn === 'RED'
+      const roots = dedupMoves(s, getLegalMoves(s))
+      const tied = roots.filter((m) => referenceScore(applyMove(s, m)) === v)
+      const errors = (m: (typeof roots)[number]) => {
+        const c = applyMove(s, m)
+        if (isGameOver(c)) return 0
+        return dedupMoves(c, getLegalMoves(c)).filter((r) => {
+          const g = referenceScore(applyMove(c, r))
+          return isMax ? g > v : g < v
+        }).length
+      }
+      const errs = tied.map(errors)
+      const max = Math.max(...errs)
+      const expected = tied[errs.indexOf(max)]!
+      const got = findBestMoveTieBreak(s).move!
+      expect(got).toEqual(expected)
+      if (tied.length > 1) tiedCases++
+    }
+    // 確保真的有測到同分情境，而不是全部單一最優手。
+    expect(tiedCases).toBeGreaterThan(10)
   })
 })
 

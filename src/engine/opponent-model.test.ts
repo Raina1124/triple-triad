@@ -6,6 +6,7 @@
 //   1. uniform 必須與改動前的內建 draw 逐輪一致（不得回歸）。
 //   2. NPC 牌組資料與卡池對得起來，且固定牌必抽、已亮牌不外洩。
 //   3. 玩家模型抽出的牌永遠符合遊戲的牌組合法性，且填充位是強 3★。
+//   4. 選拔模型抽出的牌與已亮牌合起來，恰為 1★~5★ 各一張。
 // ============================================================
 
 import { describe, expect, it } from 'vitest'
@@ -63,10 +64,17 @@ describe('uniform 模型（維持舊行為）', () => {
     expect(model.candidates.length).toBe(candidates.length)
 
     seed = 111
-    const a = Array.from({ length: 200 }, () => oldDraw().map((c) => c.id).join(','))
+    const a = Array.from({ length: 200 }, () =>
+      oldDraw()
+        .map((c) => c.id)
+        .join(','),
+    )
     seed = 111
     const b = Array.from({ length: 200 }, () =>
-      model.draw(n, rnd).map((c) => c.id).join(','),
+      model
+        .draw(n, rnd)
+        .map((c) => c.id)
+        .join(','),
     )
     expect(b).toEqual(a)
   })
@@ -171,6 +179,50 @@ describe('玩家模型', () => {
         n++
       }
     expect(sum / n).toBeGreaterThan(avgAll3)
+  })
+})
+
+describe('選拔模型', () => {
+  const byName = (n: string) => CARD_POOL.find((c) => c.name === n)!
+
+  it('未亮牌時抽 5 張：1★~5★ 各一張', () => {
+    const m = createOpponentModel({ kind: 'draft' })
+    for (let t = 0; t < 500; t++) {
+      const drawn = m.draw(5, rnd)
+      expect(drawn.map(starOf).sort()).toEqual([1, 2, 3, 4, 5])
+    }
+  })
+
+  it('亮出 1★/2★/5★ 後（2026-09-29 實戰），剩 2 張必為 3★ + 4★ 且不含已亮牌', () => {
+    const shown = [byName('Alpaca'), byName('Ejika Tsunjika'), byName('Regula van Hydrus')]
+    expect(shown.map(starOf)).toEqual([1, 2, 5])
+    const m = createOpponentModel({ kind: 'draft' }, { excludeCards: shown })
+    for (const c of m.candidates) expect([3, 4]).toContain(starOf(c))
+    const shownSig = new Set(shown.map(cardSignature))
+    for (let t = 0; t < 500; t++) {
+      const drawn = m.draw(2, rnd)
+      expect(drawn.map(starOf).sort()).toEqual([3, 4])
+      for (const c of drawn) expect(shownSig.has(cardSignature(c))).toBe(false)
+    }
+  })
+
+  it('手動填值（星級是佔位值）的已亮牌，仍依簽名認出真正星級', () => {
+    const five = CARD_POOL.find((c) => c.stars === 5)!
+    const manual: Card = {
+      id: -9,
+      name: '手動',
+      stars: 1,
+      edges: { ...five.edges },
+      type: five.type,
+    }
+    const m = createOpponentModel({ kind: 'draft' }, { excludeCards: [manual] })
+    for (let t = 0; t < 200; t++) expect(m.draw(4, rnd).map(starOf).sort()).toEqual([1, 2, 3, 4])
+  })
+
+  it('星級與未知槽數對不上（如交換換入我方牌）時仍回傳正確張數', () => {
+    const shown = [1, 2, 3, 4, 5].map((s) => CARD_POOL.find((c) => c.stars === s)!)
+    const m = createOpponentModel({ kind: 'draft' }, { excludeCards: shown })
+    for (let t = 0; t < 20; t++) expect(m.draw(1, rnd)).toHaveLength(1)
   })
 })
 

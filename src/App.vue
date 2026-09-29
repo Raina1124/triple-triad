@@ -4,7 +4,7 @@
 // 職責：持有所有狀態、呼叫引擎、組合展示型子元件。
 // 展示細節都在子元件：CardView / HandPanel / BoardCell / RuleBar。
 // ============================================================
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import type { Board, Cell, GameState, Player, Rules, Card, EdgeValue, Edges } from './engine/types'
 import { CARD_POOL } from './engine/card-pool'
 import { applyMove, getWinner, isGameOver } from './engine/game'
@@ -18,11 +18,39 @@ import HandPanel from './components/HandPanel.vue'
 import BoardCell from './components/BoardCell.vue'
 import RuleBar from './components/RuleBar.vue'
 import CardPicker from './components/CardPicker.vue'
+import HelpSheet from './components/HelpSheet.vue'
+import TourGuide from './components/TourGuide.vue'
 
 // ---------- 視窗寬度 ----------
 // 手機（≤720px）時，對手牌組模型與牌組槽預設摺疊，棋盤優先。
 const narrowQuery = window.matchMedia('(max-width: 720px)')
 const narrow = ref(narrowQuery.matches)
+
+const showHelp = ref(false)
+
+// ---------- 導覽（第一次開網頁時自動播放一次）----------
+// 看完或略過就在 localStorage 記一筆，之後不再自動出現；可從說明面板重看。
+// 瀏覽器禁用儲存時 localStorage 會丟例外，那就每次都播，不影響使用。
+const TOUR_KEY = 'tt-tour-done'
+const touring = ref(false)
+onMounted(() => {
+  let done = false
+  try {
+    done = localStorage.getItem(TOUR_KEY) === '1'
+  } catch {}
+  // 等字型載完再開始，避免量到字型替換前的版面位置。
+  if (!done) document.fonts.ready.then(() => (touring.value = true))
+})
+function endTour() {
+  touring.value = false
+  try {
+    localStorage.setItem(TOUR_KEY, '1')
+  } catch {}
+}
+function replayTour() {
+  showHelp.value = false
+  touring.value = true
+}
 narrowQuery.addEventListener('change', (e) => (narrow.value = e.matches))
 
 // ---------- 初始狀態 ----------
@@ -125,9 +153,10 @@ function clearOppDeck() {
 // 「對手的未知牌從哪裡抽」是建議品質最大的變因（見 opponent-model.ts）：
 // 預設的全卡池均勻抽等於假設對手拿一副隨機爛牌，會讓自報分數過度樂觀。
 //   NPC   → 用該 NPC 的實際牌組，抽樣空間從 470 塌縮到約 5~10 張。
-//   玩家  → 牌組星級上限照遊戲規則，填充位假設為有競爭力的 3★。
-//   不指定 → 維持舊行為。
-const oppKind = ref<'uniform' | 'npc' | 'player'>('uniform')
+//   一般  → 引擎的 player 模型：牌組星級上限照遊戲規則，填充位假設為有競爭力的 3★。
+//   選拔  → 錦標賽選拔規則：1★~5★ 各一張，未知牌必為還沒亮出的星級。
+// 全卡池均勻抽（uniform）分數過度樂觀，UI 不再提供；引擎端仍保留該模型。
+const oppKind = ref<'npc' | 'player' | 'draft'>('player')
 const oppNpcId = ref<number | null>(null)
 const npcQuery = ref('')
 
@@ -148,18 +177,73 @@ const npcMatches = computed(() => {
 })
 const selectedNpc = computed(() => npcList.value.find((n) => n.id === oppNpcId.value) ?? null)
 
+// 選定 NPC：
+//   1. 規則列整組換成該 NPC 的規則（地區規則請選完再手動加）。
+//   2. 換成「另一位」NPC 時清掉對手牌組記憶——留著上一位的牌，NPC 模型的
+//      固定牌會對不上而退化。按 × 後重選同一位、或第一次選 NPC 時保留記憶。
+// 規則變更本來就會重置牌局（見 updateRules），這裡沿用同一條路。
+let lastNpcId: number | null = null
 function pickNpc(id: number) {
   oppNpcId.value = id
   npcQuery.value = ''
+  if (lastNpcId !== null && lastNpcId !== id) oppDeck.value = [null, null, null, null, null]
+  lastNpcId = id
+  const npc = NPC_DECKS.find((n) => n.id === id)!
+  const next: Rules = {
+    same: false,
+    plus: false,
+    combo: rules.combo,
+    reverse: false,
+    fallenAce: false,
+    order: false,
+    chaos: false,
+    threeOpen: false,
+    allOpen: false,
+    ascension: false,
+    descension: false,
+    swap: false,
+  }
+  for (const r of npc.rules) {
+    const key = NPC_RULE_INFO[r]?.key
+    if (key) next[key] = true
+  }
+  updateRules(next)
 }
 
-// 傳給引擎的模型設定。選了 NPC 類型但還沒選 NPC 時退回 uniform。
+// 傳給引擎的模型設定。選了 NPC 類型但還沒選 NPC 時退回一般（player）。
 const opponentSpec = computed<OpponentModelSpec>(() => {
   if (oppKind.value === 'npc' && oppNpcId.value !== null)
     return { kind: 'npc', npcId: oppNpcId.value }
-  if (oppKind.value === 'player') return { kind: 'player' }
-  return { kind: 'uniform' }
+  if (oppKind.value === 'draft') return { kind: 'draft' }
+  return { kind: 'player' }
 })
+
+// NPC 規則對照（npc-decks.ts 的 rules 是來源的英文原名）。沒對照到的顯示時退回英文。
+//   zh   — 中文名，用詞與 RuleBar 一致。
+//   key  — 對應的 Rules 欄位，選定 NPC 時自動開啟；沒有 key＝引擎未實作。
+//   warn — 引擎未實作的規則，選到該 NPC 時顯示的提醒。
+const NPC_RULE_INFO: Record<string, { zh: string; key?: keyof Rules; warn?: string }> = {
+  'All Open': { zh: '全明牌', key: 'allOpen' },
+  'Three Open': { zh: '三明牌', key: 'threeOpen' },
+  Same: { zh: '同數', key: 'same' },
+  Plus: { zh: '加算', key: 'plus' },
+  Reverse: { zh: '逆轉', key: 'reverse' },
+  'Fallen Ace': { zh: '王牌殺手', key: 'fallenAce' },
+  Order: { zh: '秩序', key: 'order' },
+  Chaos: { zh: '混亂', key: 'chaos' },
+  Ascension: { zh: '同類強化', key: 'ascension' },
+  Descension: { zh: '同類弱化', key: 'descension' },
+  Swap: { zh: '交換', key: 'swap' },
+  Roulette: { zh: '天選', warn: '天選：實際抽到的規則請手動開啟' },
+  'Sudden Death': { zh: '不勝不休', warn: '不勝不休：平手重賽未納入計算' },
+}
+function npcRulesText(rules: string[]): string {
+  return rules.map((r) => NPC_RULE_INFO[r]?.zh ?? r).join('・')
+}
+// 已選 NPC 身上、引擎未實作的規則提醒（沒有則為空陣列）。
+const npcRuleWarnings = computed(() =>
+  (selectedNpc.value?.rules ?? []).flatMap((r) => NPC_RULE_INFO[r]?.warn ?? []),
+)
 
 // ---------- 牌組儲存槽（僅本次網頁工作階段）----------
 // 同一次開網頁打多個 NPC 時，可把目前牌組快照進槽位、之後取回，
@@ -613,17 +697,20 @@ function pickCard(picked: Card) {
 }
 
 // 手動輸入四邊數值：只更新 edges，其餘保留。
-function applyManual(edges: {
-  top: EdgeValue
-  right: EdgeValue
-  bottom: EdgeValue
-  left: EdgeValue
-}) {
+function applyManual(
+  edges: {
+    top: EdgeValue
+    right: EdgeValue
+    bottom: EdgeValue
+    left: EdgeValue
+  },
+  type: NonNullable<Card['type']>,
+) {
   // 編輯棋盤卡。
   if (editingCellIndex.value !== null) {
     const cell = board.value[editingCellIndex.value]
     if (cell && cell.card) {
-      cell.card = { ...cell.card, edges: { ...edges } }
+      cell.card = { ...cell.card, edges: { ...edges }, type }
       board.value = [...board.value]
     }
     cancelEdit()
@@ -640,6 +727,7 @@ function applyManual(edges: {
     hand[idx] = {
       ...base,
       edges: { ...edges },
+      type,
       unknown: false,
       name: base.unknown ? '已填入' : base.name,
     }
@@ -843,7 +931,7 @@ function suggestBest() {
       const forWho = turn.value === mySide.value ? '我方' : '對手'
       // 依計算模式標註：抽樣平均（分數可能非整數）／估計卡／精確（不標）。
       // 候選數＝對手未知牌還剩幾種可能。數字小＝推論收得緊＝這個分數可信；
-      // uniform（沒指定對手）時是幾百，正好提醒使用者分數偏樂觀。
+      // 一般模型時約兩百張，NPC 模型時只有個位數。
       const candNote = result.mode === 'exact' ? '' : `，對手候選 ${result.candidates} 張`
       const modeNote =
         result.mode === 'sampled'
@@ -885,6 +973,14 @@ const score = computed(() => {
 })
 
 const gameOver = computed(() => isGameOver(buildState()))
+
+// 建議按鈕下方的提示：
+//   混亂規則且尚未點牌 → 必須先點被指定的牌，建議只算那張牌的落點。
+//   空盤（先手第一張）→ 搜尋最深，要算比較久。
+const chaosNeedsPick = computed(
+  () => rules.chaos && selectedCardId.value === null && !gameOver.value,
+)
+const openingMove = computed(() => board.value.every((c) => c.card === null))
 const winner = computed(() => (gameOver.value ? getWinner(buildState()) : null))
 
 // ---------- 顯示用手牌槽 ----------
@@ -921,12 +1017,23 @@ function isPlaceable(cell: Cell, index: number): boolean {
   <div class="saucer">
     <!-- 頁首 + 規則列 -->
     <header class="topbar">
-      <h1 class="title">金碟幻卡<span class="title-sub">· 分析台</span></h1>
-      <RuleBar :rules="rules" @update:rules="updateRules" />
+      <div class="title-row">
+        <h1 class="title">金碟幻卡<span class="title-sub">· 分析台</span></h1>
+        <button
+          class="help-btn"
+          data-tour="help"
+          aria-label="使用說明"
+          title="使用說明"
+          @click="showHelp = true"
+        >
+          ?
+        </button>
+      </div>
+      <RuleBar data-tour="rules" :rules="rules" @update:rules="updateRules" />
     </header>
 
     <!-- 開局設定：我方座位、開局先手（兩者獨立） -->
-    <div class="setup-bar">
+    <div class="setup-bar" data-tour="setup">
       <div class="setup-group">
         <span class="setup-label">我方座位</span>
         <div class="seg">
@@ -971,6 +1078,7 @@ function isPlaceable(cell: Cell, index: number): boolean {
       <aside class="hands">
         <HandPanel
           player="BLUE"
+          :data-tour="mySide === 'BLUE' ? 'my-hand' : undefined"
           :slots="blueSlots"
           :score="score.blue"
           :selected-card-id="selectedCardId"
@@ -985,6 +1093,7 @@ function isPlaceable(cell: Cell, index: number): boolean {
         />
         <HandPanel
           player="RED"
+          :data-tour="mySide === 'RED' ? 'my-hand' : undefined"
           :slots="redSlots"
           :score="score.red"
           :selected-card-id="selectedCardId"
@@ -1023,7 +1132,7 @@ function isPlaceable(cell: Cell, index: number): boolean {
           <button class="clear-opp-btn" @click="clearOppDeck">洗掉對手牌</button>
         </div>
 
-        <details class="fold" :open="!narrow">
+        <details class="fold" data-tour="opponent" :open="!narrow">
           <summary class="fold-summary">對手牌組・牌組槽</summary>
           <div class="fold-body">
             <!-- 對手牌組模型：決定未知牌從哪裡抽，直接影響建議與分數可信度 -->
@@ -1031,20 +1140,20 @@ function isPlaceable(cell: Cell, index: number): boolean {
               <div class="opp-model-title">對手牌組</div>
               <div class="opp-model-kinds">
                 <button
-                  v-for="k in ['uniform', 'npc', 'player'] as const"
+                  v-for="k in ['player', 'draft', 'npc'] as const"
                   :key="k"
                   class="opp-model-kind"
                   :class="{ active: oppKind === k }"
                   @click="oppKind = k"
                 >
-                  {{ k === 'uniform' ? '不指定' : k === 'npc' ? 'NPC' : '玩家' }}
+                  {{ k === 'npc' ? 'NPC' : k === 'draft' ? '選拔' : '一般' }}
                 </button>
               </div>
               <template v-if="oppKind === 'npc'">
                 <div v-if="selectedNpc" class="opp-model-picked">
                   {{ selectedNpc.nameZh ?? selectedNpc.name }}
                   <span class="opp-model-rules">{{
-                    selectedNpc.rules.join('・') || '無特殊規則'
+                    npcRulesText(selectedNpc.rules) || '無特殊規則'
                   }}</span>
                   <button class="opp-model-clear" @click="oppNpcId = null">×</button>
                 </div>
@@ -1063,7 +1172,7 @@ function isPlaceable(cell: Cell, index: number): boolean {
                   >
                     {{ n.nameZh ?? n.name }}
                     <span class="opp-model-rules">
-                      {{ n.nameZh ? n.name + '　' : '' }}{{ n.rules.join('・') }}
+                      {{ n.nameZh ? n.name + '　' : '' }}{{ npcRulesText(n.rules) }}
                     </span>
                   </button>
                 </div>
@@ -1073,12 +1182,15 @@ function isPlaceable(cell: Cell, index: number): boolean {
                   oppKind === 'npc'
                     ? selectedNpc
                       ? '用該 NPC 的實際牌組抽樣'
-                      : '尚未選 NPC，暫時當作不指定'
-                    : oppKind === 'player'
-                      ? '依牌組規則限制星級，填充位假設為強 3★'
-                      : '從全卡池均勻抽，分數會偏樂觀'
+                      : '尚未選 NPC，暫時當作一般'
+                    : oppKind === 'draft'
+                      ? '錦標賽選拔：1★~5★ 各一張，依已亮出的星級推論'
+                      : '依玩家牌組規則限制星級，填充位假設為強 3★'
                 }}
               </div>
+              <template v-if="oppKind === 'npc'">
+                <div v-for="w in npcRuleWarnings" :key="w" class="opp-model-warn">⚠ {{ w }}</div>
+              </template>
             </div>
 
             <!-- 牌組儲存槽（僅本次開啟網頁期間有效，重新整理即消失） -->
@@ -1159,7 +1271,7 @@ function isPlaceable(cell: Cell, index: number): boolean {
           </template>
         </div>
 
-        <div class="board">
+        <div class="board" data-tour="board">
           <BoardCell
             v-for="(cell, i) in board"
             :key="i"
@@ -1175,11 +1287,21 @@ function isPlaceable(cell: Cell, index: number): boolean {
         </div>
 
         <div class="controls">
-          <button class="btn primary" :disabled="thinking || gameOver" @click="suggestBest">
+          <button
+            class="btn primary"
+            data-tour="suggest"
+            :disabled="thinking || gameOver"
+            @click="suggestBest"
+          >
             {{ thinking ? '推演中…' : '建議最佳手' }}
           </button>
           <button class="btn ghost" @click="reset">重置牌局</button>
         </div>
+
+        <p v-if="chaosNeedsPick" class="hint hint-alert">
+          ⚠ 混亂規則：請先點選這一手被遊戲指定的牌，再按「建議最佳手」
+        </p>
+        <p v-if="openingMove" class="hint">先手時第一張牌的建議需要跑比較久，請耐心等候～</p>
 
         <p class="suggestion" v-if="suggestionText">{{ suggestionText }}</p>
       </main>
@@ -1195,6 +1317,9 @@ function isPlaceable(cell: Cell, index: number): boolean {
       @manual="applyManual"
       @cancel="cancelPicker"
     />
+
+    <HelpSheet v-if="showHelp" @close="showHelp = false" @tour="replayTour" />
+    <TourGuide v-if="touring" @done="endTour" />
   </div>
 </template>
 
@@ -1242,6 +1367,38 @@ function isPlaceable(cell: Cell, index: number): boolean {
   margin: 0;
   color: var(--gold);
   text-shadow: 0 0 12px rgba(217, 180, 73, 0.3);
+}
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.help-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--gold-dim);
+  background: transparent;
+  color: var(--gold);
+  font-family: 'Cinzel', serif;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.help-btn:hover {
+  border-color: var(--gold);
+  background: rgba(217, 180, 73, 0.1);
+}
+@media (pointer: coarse) {
+  .help-btn {
+    width: 44px;
+    height: 44px;
+    font-size: 18px;
+  }
 }
 .title-sub {
   font-size: 0.6em;
@@ -1525,6 +1682,20 @@ function isPlaceable(cell: Cell, index: number): boolean {
   letter-spacing: 0.5px;
 }
 
+.hint {
+  font-size: 13px;
+  color: var(--gold-dim);
+  text-align: center;
+  margin: 0;
+}
+.hint-alert {
+  color: var(--ivory);
+  background: rgba(193, 77, 66, 0.18);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
 /* 響應式 */
 @media (max-width: 720px) {
   .saucer {
@@ -1741,6 +1912,11 @@ function isPlaceable(cell: Cell, index: number): boolean {
   font-size: 11px;
   color: var(--ivory);
   opacity: 0.55;
+}
+.opp-model-warn {
+  font-family: 'Noto Serif TC', serif;
+  font-size: 11px;
+  color: var(--gold);
 }
 .deck-slots {
   background: var(--panel-2);

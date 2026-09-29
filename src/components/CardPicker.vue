@@ -6,6 +6,8 @@
 // ============================================================
 import { ref, computed, watch, onMounted } from 'vue'
 import type { Card, EdgeValue } from '../engine/types'
+
+type CardType = NonNullable<Card['type']>
 import { CARD_POOL } from '../engine/card-pool'
 
 interface Props {
@@ -30,6 +32,7 @@ const emit = defineEmits<{
   (
     e: 'manual',
     edges: { top: EdgeValue; right: EdgeValue; bottom: EdgeValue; left: EdgeValue },
+    type: CardType,
   ): void
   (e: 'cancel'): void
 }>()
@@ -140,6 +143,9 @@ const top = ref<string>(props.card ? String(props.card.edges.top) : '5')
 const right = ref<string>(props.card ? String(props.card.edges.right) : '5')
 const bottom = ref<string>(props.card ? String(props.card.edges.bottom) : '5')
 const left = ref<string>(props.card ? String(props.card.edges.left) : '5')
+// 種族：非必填，預設沿用這張卡原本的種族（未知卡＝無）。
+// 只影響同類強化/弱化的計算。
+const manualType = ref<CardType>(props.card?.type ?? 'none')
 
 function clampLive(s: string): string {
   if (s === '' || s === '-') return s
@@ -175,12 +181,16 @@ function clampFinal(s: string): EdgeValue {
 }
 
 function applyManual() {
-  emit('manual', {
-    top: clampFinal(top.value),
-    right: clampFinal(right.value),
-    bottom: clampFinal(bottom.value),
-    left: clampFinal(left.value),
-  })
+  emit(
+    'manual',
+    {
+      top: clampFinal(top.value),
+      right: clampFinal(right.value),
+      bottom: clampFinal(bottom.value),
+      left: clampFinal(left.value),
+    },
+    manualType.value,
+  )
 }
 
 // 顯示卡名：優先中文，其次英文。
@@ -321,6 +331,20 @@ onMounted(() => {
             v-model="bottom"
             aria-label="下"
           />
+        </div>
+        <div class="manual-type">
+          <span class="manual-type-label">種族（選填）</span>
+          <div class="manual-type-opts">
+            <button
+              v-for="o in typeOptions.filter((o) => o.value !== '')"
+              :key="o.value"
+              class="manual-type-btn"
+              :class="{ on: manualType === o.value }"
+              @click="manualType = o.value as CardType"
+            >
+              {{ o.label }}
+            </button>
+          </div>
         </div>
         <button class="btn primary" @click="applyManual">套用數值</button>
       </div>
@@ -587,6 +611,43 @@ onMounted(() => {
   flex-direction: column;
   align-items: center;
   gap: 14px;
+}
+.manual-type {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.manual-type-label {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.manual-type-opts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+.manual-type-btn {
+  font-family: 'Noto Serif TC', serif;
+  font-size: 13px;
+  min-height: 32px;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--ivory);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.manual-type-btn.on {
+  border-color: var(--gold);
+  color: var(--gold);
+  background: rgba(217, 180, 73, 0.1);
+}
+@media (pointer: coarse) {
+  .manual-type-btn {
+    min-height: 40px;
+  }
 }
 .cross {
   display: grid;

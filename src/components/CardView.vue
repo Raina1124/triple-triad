@@ -4,7 +4,7 @@
 // 只負責顯示傳入的卡，不持有任何業務狀態。
 // 手牌與棋盤上的卡都用它，靠 props 控制外觀與狀態。
 // ============================================================
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { Card, Edges, Player } from '../engine/types'
 
 interface Props {
@@ -30,6 +30,16 @@ const props = withDefaults(defineProps<Props>(), {
 
 // 實際顯示的四邊值：優先用加成後的 displayEdges，否則原始 edges。
 const shownEdges = computed(() => props.displayEdges ?? props.card.edges)
+// 種族徽章：取種族名稱第一個字（與 CardPicker 的篩選選單用詞一致）。
+// 無種族不顯示——大多數卡沒有種族，只在有意義時出現。
+const TYPE_MARK: Record<string, string> = {
+  primal: '蠻',
+  scion: '拂',
+  garlean: '帝',
+  beastman: '獸',
+}
+const typeMark = computed(() => TYPE_MARK[props.card.type ?? 'none'])
+
 // 某一邊是否被加成改變了（用來標色提示）。
 function boosted(dir: keyof Edges): boolean {
   return !!props.displayEdges && props.displayEdges[dir] !== props.card.edges[dir]
@@ -44,6 +54,40 @@ function onClick() {
   if (props.clickable) emit('select')
 }
 
+// ---------- 翻面動畫 ----------
+// 同一張卡（id 不變）歸屬改變 = 被翻面。流程：
+//   flip-out：舊顏色轉到側面 → 側面那一刻換成新顏色 → flip-in：轉回正面。
+// 換成別張卡（調換位置、編輯換卡）不是翻面，直接顯示新狀態。
+// shownOwner 是畫面上的顏色，翻到一半前會刻意落後於 props.owner。
+const shownOwner = ref(props.owner)
+const flipPhase = ref<'out' | 'in' | null>(null)
+// 落下動畫只在剛放上棋盤時播一次。若讓 .placed 一直帶著 drop，
+// 翻面結束 animation 回到 drop 時會整張卡重播落下。
+const entering = ref(props.size === 'placed')
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
+
+watch([() => props.owner, () => props.card.id], ([owner, id], [, prevId]) => {
+  if (id !== prevId || reduceMotion.matches) {
+    shownOwner.value = owner
+    flipPhase.value = null
+    return
+  }
+  flipPhase.value = 'out'
+})
+
+// Vue scoped 樣式會替 keyframes 名稱加上後綴，所以用 startsWith 比對。
+function onAnimationEnd(ev: AnimationEvent) {
+  const name = ev.animationName
+  if (name.startsWith('drop')) {
+    entering.value = false
+  } else if (name.startsWith('flip-out')) {
+    shownOwner.value = props.owner
+    flipPhase.value = 'in'
+  } else if (name.startsWith('flip-in')) {
+    flipPhase.value = null
+  }
+}
+
 function onEdit(ev: Event) {
   // 擋掉冒泡，避免點編輯鈕同時觸發卡片選取。
   ev.stopPropagation()
@@ -55,11 +99,13 @@ function onEdit(ev: Event) {
   <button
     class="card"
     :class="[
-      owner === 'RED' ? 'red' : 'blue',
+      shownOwner === 'RED' ? 'red' : 'blue',
       size,
-      { selected, dim, clickable, editing, unknown: card.unknown },
+      flipPhase ? `flip-${flipPhase}` : '',
+      { selected, dim, clickable, editing, entering, unknown: card.unknown },
     ]"
     @click="onClick"
+    @animationend="onAnimationEnd"
   >
     <!-- 未知卡：顯示問號，不顯示數值 -->
     <template v-if="card.unknown">
@@ -72,6 +118,7 @@ function onEdit(ev: Event) {
       <span class="cn cn-b" :class="{ boost: boosted('bottom') }">{{ shownEdges.bottom }}</span>
       <span class="cn cn-l" :class="{ boost: boosted('left') }">{{ shownEdges.left }}</span>
       <span class="card-name">{{ card.nameZh ?? card.name }}</span>
+      <span v-if="typeMark" class="type-mark">{{ typeMark }}</span>
     </template>
     <span v-if="editable" class="edit-btn" role="button" aria-label="編輯數值" @click="onEdit"
       >✎</span
@@ -110,6 +157,8 @@ function onEdit(ev: Event) {
   width: 100%;
   height: 100%;
   border-radius: 7px;
+}
+.card.placed.entering {
   animation: drop 0.22s ease-out;
 }
 @keyframes drop {
@@ -120,6 +169,37 @@ function onEdit(ev: Event) {
   to {
     transform: scale(1);
     opacity: 1;
+  }
+}
+
+/* 簽名動作：被翻面的卡繞縱軸翻轉，轉到側面時換色。
+   延遲 0.12s 讓剛落下的卡先落定，再看見翻面結果。
+   fill both：延遲期間停在正面、flip-out 結束後停在側面，
+   換成 flip-in 前不會閃回正面。 */
+.card.flip-out {
+  z-index: 2;
+  animation: flip-out 0.16s ease-in 0.12s both;
+}
+.card.flip-in {
+  z-index: 2;
+  animation: flip-in 0.26s ease-out both;
+}
+@keyframes flip-out {
+  from {
+    transform: perspective(600px) rotateY(0deg);
+  }
+  to {
+    transform: perspective(600px) rotateY(90deg) scale(1.08);
+  }
+}
+@keyframes flip-in {
+  from {
+    transform: perspective(600px) rotateY(-90deg) scale(1.08);
+    filter: brightness(1.5);
+  }
+  to {
+    transform: perspective(600px) rotateY(0deg);
+    filter: brightness(1);
   }
 }
 
@@ -142,6 +222,32 @@ function onEdit(ev: Event) {
 }
 .card.placed .card-name {
   font-size: 12px;
+}
+
+/* 種族徽章：左上角（右上角是編輯鈕）。深底淺字，紅藍卡面都讀得清楚；
+   不用顏色區分種族，避免跟紅藍歸屬、金色加成搶意義。 */
+.type-mark {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 17px;
+  height: 17px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.38);
+  color: var(--ivory);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.card.placed .type-mark {
+  top: 5px;
+  left: 5px;
+  width: 20px;
+  height: 20px;
+  font-size: 13px;
 }
 
 .cn {

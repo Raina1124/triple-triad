@@ -47,7 +47,7 @@ function cardSignature(
 //   - 走法排序（1-ply 物質差）：開局翻面少、無鑑別度，實測反而變慢。
 //   - 置換表：翻面讓擁有者圖樣高度依賴出牌順序，真正的置換很少，
 //     鍵建構成本吃掉收益（實測增益 <25% 且部分情境倒退）。
-function dedupMoves(state: GameState, moves: Move[]): Move[] {
+export function dedupMoves(state: GameState, moves: Move[]): Move[] {
   const hand = state.turn === 'RED' ? state.redHand : state.blueHand
   if (hand.length <= 1) return moves
 
@@ -184,6 +184,60 @@ export function findBestMoveForCard(state: GameState, cardId: number): SearchRes
   }
 
   return { score: bestScore, move: bestMove }
+}
+
+// ---------- 根節點同分決勝：對手犯錯空間 ----------
+// search() 只在分數「嚴格更好」時換手，同分時保留第一個找到的，而根節點
+// 著手順序＝手牌順序 × 格子 0→8。開局估計卡下多數開局同分（實例：45 種中
+// 33 種為 0），於是建議實際上由 UI 手牌排列決定，永遠是「第一張放左上」。
+//
+// 改成：同分的根著手中，選「對手的回應裡，會讓我方變得更好的回應最多」的一手——
+// 對手必須回得精準才守得住，失手我方就賺。仍是精確搜尋值，不是啟發式加權。
+// 犯錯數也相同時維持原順序（第一個），所以沒有同分時結果與 findBestMove 完全相同。
+// 對手回應同樣去重（估計卡內容全同，只算一次）；同一根局面下每個同分著手的
+// 回應數都相同，所以比張數即等於比比例。
+//
+// 兩段都用窄窗搜尋（分數為整數；fail-soft 回傳值落在窗內即為精確值）：
+//   同分判定：窗 (v−1, v+1)，回傳 === v 才同分（最優值 v 之外只會落在窗外）。
+//   對手失手：我方是 Max 用窗 (v, v+1)、回傳 > v；我方是 Min 用窗 (v−1, v)、回傳 < v。
+export function findBestMoveTieBreak(state: GameState, restrictToCardId?: number): SearchResult {
+  const best =
+    restrictToCardId !== undefined
+      ? findBestMoveForCard(state, restrictToCardId)
+      : findBestMove(state)
+  if (best.move === null) return best
+  const v = best.score
+  const isMax = state.turn === 'RED'
+
+  let roots = dedupMoves(state, getLegalMoves(state))
+  if (restrictToCardId !== undefined) roots = roots.filter((m) => m.cardId === restrictToCardId)
+
+  const tied: Move[] = []
+  for (const m of roots) {
+    if (m.cardId === best.move.cardId && m.cellIndex === best.move.cellIndex) tied.push(m)
+    else if (search(applyMove(state, m), v - 1, v + 1).score === v) tied.push(m)
+  }
+  if (tied.length <= 1) return best
+
+  let pick = tied[0]!
+  let pickErrors = -1
+  for (const m of tied) {
+    const child = applyMove(state, m)
+    let errors = 0
+    if (!isGameOver(child)) {
+      for (const r of dedupMoves(child, getLegalMoves(child))) {
+        const g = isMax
+          ? search(applyMove(child, r), v, v + 1).score
+          : search(applyMove(child, r), v - 1, v).score
+        if (isMax ? g > v : g < v) errors++
+      }
+    }
+    if (errors > pickErrors) {
+      pickErrors = errors
+      pick = m
+    }
+  }
+  return { score: v, move: pick }
 }
 
 // ---------- 輔助：把分數翻譯成「對當前玩家」的好壞 ----------

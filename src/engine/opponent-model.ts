@@ -13,6 +13,8 @@
 //             抽樣空間從 470 塌縮到約 5~10 張。
 //   player  — 玩家牌組：星級上限照遊戲規則 ＋ 填充位假設為有競爭力的 3★。
 //             兩者必須並用，只加合法性約束會讓結果更糟（見下方註解）。
+//   draft   — 錦標賽「選拔」規則：牌由主辦方提供，每個星級各一張。
+//             已亮出的牌佔掉自己的星級，未知牌必為其餘星級各一張。
 //
 // 介面刻意只有一個方法 draw(n, rng)：抽 n 張未知牌，供 sampled 模式用。
 // 深盤面的 estimate 模式不走這裡——實測過讓模型提供「牌組專屬估計邊值」，
@@ -28,6 +30,7 @@ export type OpponentModelSpec =
   | { kind: 'uniform' }
   | { kind: 'npc'; npcId: number }
   | { kind: 'player' }
+  | { kind: 'draft' }
 
 export interface OpponentModelContext {
   // 抽樣卡池（預設全卡池）。測試可注入小卡池。
@@ -71,6 +74,17 @@ function takeDistinct(source: Card[], k: number, rng: () => number, idx: number[
 
 function makeIdx(source: Card[]): number[] {
   return source.map((_, i) => i)
+}
+
+// 已亮出牌的真正星級：手動填值的卡 stars 可能是佔位值，
+// 先用簽名回卡池查，查不到才用卡上的 stars。player / draft 模型共用。
+function revealedStars(pool: Card[], revealed: Card[]): number[] {
+  const starBySig = new Map<string, number>()
+  for (const c of pool) {
+    const sig = cardSignature(c)
+    if (!starBySig.has(sig)) starBySig.set(sig, c.stars)
+  }
+  return revealed.map((c) => starBySig.get(cardSignature(c)) ?? c.stars)
 }
 
 // 抽到的張數不足 n 時，從備援卡池補滿（排除已抽到的簽名）。
@@ -202,6 +216,47 @@ class PlayerModel implements OpponentModel {
   }
 }
 
+// ---------- draft：錦標賽選拔 ----------
+// 選拔牌組＝1★~5★ 各一張（開賽前從三組隨機選項各挑一張，整場鎖定）。
+// 所以未知牌的星級不是猜的，而是「還沒亮出的星級」各一張，每亮一張就再確定一級。
+//
+// 同星級內均勻抽：選項是隨機產生的，沒有「玩家必拿強牌」這類可靠假設可用；
+// 也因此不綁定「數字大＝強」，逆轉等規則下不會像 player 模型的填充位那樣
+// 系統性抽到該規則下最弱的牌。
+//
+// 缺的星級數正常會等於未知槽數。不相等時（例如交換規則把我方的牌換進對手手牌、
+// 或填錯卡），星級隨機取 n 個，不足的由 padTo 從剩餘卡池補滿。
+class DraftModel implements OpponentModel {
+  readonly kind = 'draft' as const
+  readonly candidates: Card[]
+  private tierIdx: number[][]
+  private order: number[]
+  constructor(
+    private tiers: Card[][],
+    private fallback: Card[],
+  ) {
+    this.candidates = tiers.flat()
+    this.tierIdx = tiers.map(makeIdx)
+    this.order = tiers.map((_, i) => i)
+  }
+  draw(n: number, rng: () => number): Card[] {
+    const m = Math.min(n, this.tiers.length)
+    // 部分 Fisher-Yates：挑出這次要抽的 m 個星級。
+    for (let i = 0; i < m; i++) {
+      const j = i + Math.floor(rng() * (this.order.length - i))
+      const t = this.order[i]!
+      this.order[i] = this.order[j]!
+      this.order[j] = t
+    }
+    const out: Card[] = []
+    for (let i = 0; i < m; i++) {
+      const k = this.order[i]!
+      out.push(...takeDistinct(this.tiers[k]!, 1, rng, this.tierIdx[k]!))
+    }
+    return padTo(out, n, this.fallback, rng)
+  }
+}
+
 // ---------- 建構入口 ----------
 export function createOpponentModel(
   spec: OpponentModelSpec,
@@ -223,17 +278,9 @@ export function createOpponentModel(
   }
 
   if (spec.kind === 'player') {
-    // 已亮出的牌拿星級：手動填值的卡 stars 可能是佔位值，
-    // 先用簽名回卡池查真正的星級，查不到才用卡上的 stars。
-    const starBySig = new Map<string, number>()
-    for (const c of pool) {
-      const sig = cardSignature(c)
-      if (!starBySig.has(sig)) starBySig.set(sig, c.stars)
-    }
     let revealedFive = 0
     let revealedFour = 0
-    for (const c of ctx.excludeCards ?? []) {
-      const s = starBySig.get(cardSignature(c)) ?? c.stars
+    for (const s of revealedStars(pool, ctx.excludeCards ?? [])) {
       if (s === 5) revealedFive++
       else if (s === 4) revealedFour++
     }
@@ -241,8 +288,18 @@ export function createOpponentModel(
     const pool4 = remaining.filter((c) => c.stars === 4)
     const three = remaining.filter((c) => c.stars === 3).sort((a, b) => edgeSum(b) - edgeSum(a))
     const cut = Math.max(1, Math.round(three.length * FILLER_TOP_FRACTION))
-    const fillerPool = three.length > 0 ? three.slice(0, cut) : remaining.filter((c) => c.stars <= 3)
+    const fillerPool =
+      three.length > 0 ? three.slice(0, cut) : remaining.filter((c) => c.stars <= 3)
     return new PlayerModel(pool5, pool4, fillerPool, revealedFive, revealedFour, remaining)
+  }
+
+  if (spec.kind === 'draft') {
+    const shown = new Set(revealedStars(pool, ctx.excludeCards ?? []))
+    const tiers = [1, 2, 3, 4, 5]
+      .filter((s) => !shown.has(s))
+      .map((s) => remaining.filter((c) => c.stars === s))
+      .filter((t) => t.length > 0)
+    return new DraftModel(tiers, remaining)
   }
 
   return new UniformModel(remaining)
