@@ -13,7 +13,7 @@
 export const NPC_NAMES_ZH: Record<number, string> = {
   2293874: '艾格勒菲娜*', // Aiglephine ｜ 掉落 No.313 巨怪
   2293862: '阿爾希烏*', // Arsieu ｜ 掉落 No.289 Dawon、No.290 Adrammelech
-  2293773: '梅花天王歐里福*', // Aurifort of the Three Clubs ｜ 掉落 No.27 美男子布迦加、No.12 古卜
+  2293773: '梅花天王歐里福', // Aurifort of the Three Clubs ｜ 掉落 No.27 美男子布迦加、No.12 古卜
   2293777: '巴德龍', // Baderon ｜ 掉落 No.29 十指巴德龍、No.18 魚人
   2293843: '牡丹', // Botan ｜ 掉落 No.217 Louhi、No.225 Pazuzu、No.215 Yukinko、No.216 Happy Bunny
   2293891: '希魯克·諾可', // Br'uk Noq' ｜ 掉落 No.394 Branchbearer
@@ -35,13 +35,13 @@ export const NPC_NAMES_ZH: Record<number, string> = {
   2293861: '很有氣勢的帝國兵', // Furtive Former Imperial ｜ 掉落 No.285 藍寶石武器
   2293883: '遊興威', // Gamingway ｜ 掉落 No.360 Dreamingway
   2293834: '伽利摩', // Garima ｜ 掉落 No.172 Ananta、No.192 Qiqirn Meateater
-  2293895: '嘎烏加*', // Gavoll Ja ｜ 掉落 No.398 Gulool Ja Ja
+  2293895: '嘎烏加',
   2293792: '格格魯玖', // Gegeruju ｜ 掉落 No.56 敏菲利亞、No.49 雅·修朵拉
   2293880: '伽娑', // Ghasa ｜ 掉落 No.341 Hippo Cart
   2293799: '吉布里隆*', // Gibrillont ｜ 掉落 No.75 艾斯蒂尼安
   2293849: '格林納德', // Glynard ｜ 掉落 No.239 阿馬羅
   2293856: '格雷文*', // Grewenn ｜ 掉落 No.256 蘭吉特、No.252 游末邦的小丑
-  2293766: '方塊天王古特文特*', // Guhtwint of the Three Diamonds ｜ 掉落 No.27 美男子布迦加、No.13 陸行鳥
+  2293766: '方塊天王古特文特', // Guhtwint of the Three Diamonds ｜ 掉落 No.27 美男子布迦加、No.13 陸行鳥
   2293829: '魚影', // Gyoei ｜ 掉落 No.170 Namazu、No.232 Great Gold Whisker
   2293850: '久付·烏因*', // Gyuf Uin ｜ 掉落 No.243 菲奧·烏兒
   2293789: '哈布', // Hab ｜ 掉落 No.62 希爾迪布蘭德&娜修·瑪卡拉卡、No.46 桑克瑞德、No.45 戈德伯特·曼德維爾
@@ -62,11 +62,11 @@ export const NPC_NAMES_ZH: Record<number, string> = {
   2293847: '加隆德煉鐵廠調查員', // Ironworks Hand ｜ 掉落 No.231 阿爾法、No.223 歐米茄、No.184 神龍
   2293837: '磯邊', // Isobe ｜ 掉落 No.199 安居鮟鱇、No.207 翡翠&紅
   2293772: '若約*', // Joellaut ｜ 掉落 No.59 阿爾菲諾&阿莉塞、No.15 鳥人
-  2293763: '黑桃天王喬納斯', // Jonas of the Three Spades ｜ 掉落 No.15 鳥人、No.20 莫古利
+  2293763: '黑桃天王約拿斯', // Jonas of the Three Spades ｜ 掉落 No.15 鳥人、No.20 莫古利
   2293827: '海山', // Kaizan ｜ 掉落 No.180 Rasho
   2293839: '琪琪茉*', // Kikimo ｜ 掉落 No.206 漢考克
   2293882: '奇爾芙芙', // Kilfufu ｜ 掉落 No.350 Geryon the Steer
-  2293786: '幻卡王埃爾默*', // King Elmer III ｜ 掉落 No.61 巴哈姆特、No.45 戈德伯特·曼德維爾
+  2293786: '幻卡王艾爾默', // King Elmer III ｜ 掉落 No.61 巴哈姆特、No.45 戈德伯特·曼德維爾
   2293833: '九夏', // Kiuka ｜ 掉落 No.189 飛燕
   2293814: '克林托塔', // Klynthota ｜ 掉落 No.119 提坦、No.122 贊德、No.127 黑暗之雲、No.137 Unei & Doga
   2293826: '琴風', // Kotokaze ｜ 掉落 No.174 琴風
@@ -106,7 +106,7 @@ export const NPC_NAMES_ZH: Record<number, string> = {
   2293780: '奧爾蒂里克*', // Ourdilic ｜ 掉落 No.38 凶惡巨獸、No.26 藍龍、No.11 惡精靈
   2293896: '帕庫凱*', // Pawkukwe ｜ 掉落 No.413 Ark Angel TT、No.414 Ark Angel GK
   2293774: '皮拉爾諾*', // Piralnaut ｜ 掉落 No.35 弗里克希奧、No.24 魅魔
-  2293821: '暴發戶普萊多·福爾斯塔格*', // Prideful Stag ｜ 掉落 No.145 迷途羔羊
+  2293821: '暴發戶普萊多·福爾斯塔格', // Prideful Stag ｜ 掉落 No.145 迷途羔羊
   2293881: '普魯登斯', // Prudence ｜ 掉落 No.335 Azeyma、No.334 Rhalgr
   2293899: '普代加*', // Pudeel Ja ｜ 掉落 No.427 Wivre、No.428 Doppro
   2293875: '凱塔奴爾*', // Qetanur ｜ 掉落 No.314 畢舍遮
@@ -115,7 +115,7 @@ export const NPC_NAMES_ZH: Record<number, string> = {
   2293844: '赤喙的資材負責人*', // Redbill Storeboy ｜ 掉落 No.99 艾奇德娜、No.139 卡洛菲斯提莉、No.164 虛空迪亞布羅斯、No.116 弗迪亞
   2293765: '羅傑*', // Roger ｜ 掉落 No.9 毛爾波爾、No.5 布丁
   2293791: '羅薇娜', // Rowena ｜ 掉落 No.60 路易索瓦·萊維耶勒爾、No.34 蓋羅爾特·布拉克索恩
-  2293781: '紅心天王魯希特威達*', // Ruhtwyda of the Three Hearts ｜ 掉落 No.45 戈德伯特·曼德維爾、No.50 尤里安傑·奧居雷
+  2293781: '紅心天王魯希特威達', // Ruhtwyda of the Three Hearts ｜ 掉落 No.45 戈德伯特·曼德維爾、No.50 尤里安傑·奧居雷
   2293884: '呂諾斯', // Ruissenaud ｜ 掉落 No.365 Proto-Carbuncle、No.366 Themis
   2293855: '薩烏嘶·涳爾', // Saushs Koal ｜ 掉落 No.245 Grenoldt
   2293810: '青花*', // Seika ｜ 掉落 No.93 爬蟲、No.94 智蛙、No.104 朗德洛克斯
@@ -128,13 +128,13 @@ export const NPC_NAMES_ZH: Record<number, string> = {
   2293775: '特拉哈塗姆*', // Trachtoum ｜ 掉落 No.41 泰坦、No.20 莫古利
   2293771: '幻卡大師', // Triple Triad Master ｜ 掉落 No.4 魔石精
   2293828: '葛籠', // Tsuzura ｜ 掉落 No.171 Kojin
-  2293893: '瓦塔艾*', // Uataaye ｜ 掉落 No.396 Sentry R8
+  2293893: '瓦塔艾', // Uataaye ｜ 掉落 No.396 Sentry R8
   2293840: '安博·托倫特', // Umber Torrent ｜ 掉落 No.204 阿雷恩瓦爾德·倫提努斯、No.176 弗巴德
   2293846: '潮木', // Ushiogi ｜ 掉落 No.214 蛭子、No.213 Hatamoto、No.212 輪入道&片輪車
   2293813: '好身手', // Vath Deftarm ｜ 掉落 No.84 羅波那、No.72 胖陸行鳥、No.96 夸爾女王
   2293809: '啥都吃', // Voracious Vath ｜ 掉落 No.92 邦達斯那奇、No.96 夸爾女王
   2293787: '沃爾賽勒*', // Vorsaile Heuloix ｜ 掉落 No.66 嘉恩·艾·神納、No.53 拉姆、No.48 帕帕力莫&伊達、No.43 善王莫古爾·莫古XII世
-  2293890: '瓦索沃珂*', // Warsowok ｜ 掉落 No.393 Moblin
+  2293890: '瓦索沃坷', // Warsowok ｜ 掉落 No.393 Moblin
   2293797: '瓦瓦拉哥*', // Wawalago ｜ 掉落 No.76 露琪亞
   2293889: '沃皮利*', // Wopli ｜ 掉落 No.392 Alpaca
   2293876: '懂世故的帝國兵', // Worldly Imperial ｜ 掉落 No.325 昆圖斯·范·秦納
