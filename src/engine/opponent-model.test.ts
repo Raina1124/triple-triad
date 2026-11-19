@@ -247,3 +247,119 @@ describe('退化情境：未知槽一定要填滿', () => {
     }
   })
 })
+
+describe('抽出的順序不帶規律（秩序規則只能出第一張）', () => {
+  it('NPC 模型：固定牌不會永遠排在最前面', () => {
+    // 固定牌 3 張、浮動牌 4 張的 NPC：第一格應該有時是固定牌、有時是浮動牌。
+    const d = NPC_DECKS.find((x) => x.fixed.length === 3 && x.variable.length >= 4)!
+    const m = createOpponentModel({ kind: 'npc', npcId: d.id })
+    const firstIds = new Set<number>()
+    let fixedFirst = 0
+    const N = 1000
+    for (let t = 0; t < N; t++) {
+      const first = m.draw(5, rnd)[0]!
+      firstIds.add(first.id)
+      if (d.fixed.includes(first.id)) fixedFirst++
+    }
+    for (const f of d.fixed) expect(firstIds.has(f)).toBe(true)
+    // 5 張裡 3 張是固定牌，打散後第一格是固定牌的比例應在 60% 上下。
+    expect(fixedFirst / N).toBeGreaterThan(0.5)
+    expect(fixedFirst / N).toBeLessThan(0.7)
+  })
+
+  it('玩家模型：高星牌平均分布在五個位置', () => {
+    const m = createOpponentModel({ kind: 'player' })
+    const highAt = [0, 0, 0, 0, 0]
+    let total = 0
+    for (let t = 0; t < 3000; t++) {
+      m.draw(5, rnd).forEach((c, i) => {
+        if (starOf(c) >= 4) {
+          highAt[i]!++
+          total++
+        }
+      })
+    }
+    for (const n of highAt) {
+      expect(n / total).toBeGreaterThan(0.15)
+      expect(n / total).toBeLessThan(0.25)
+    }
+  })
+})
+
+describe('玩家模型：逆轉規則', () => {
+  const reverse = {
+    same: false,
+    plus: false,
+    combo: false,
+    reverse: true,
+    fallenAce: false,
+    order: false,
+    chaos: false,
+    threeOpen: false,
+    allOpen: false,
+    ascension: false,
+    descension: false,
+    swap: false,
+  }
+  const ofStar = (s: number) => CARD_POOL.find((c) => c.stars === s)!
+  const ids = (cards: Card[]) => cards.map((c) => c.id)
+
+  it('對手還沒亮牌 → 未知牌全從 1★ 抽', () => {
+    const m = createOpponentModel({ kind: 'player' }, { rules: reverse })
+    expect(m.kind).toBe('player')
+    for (let t = 0; t < 300; t++) {
+      const drawn = m.draw(5, rnd)
+      expect(drawn).toHaveLength(5)
+      expect(new Set(ids(drawn)).size).toBe(5)
+      for (const c of drawn) expect(starOf(c)).toBe(1)
+    }
+  })
+
+  it('亮出的是 1★ → 仍從 1★ 抽，且不會再抽到那張', () => {
+    const shown = ofStar(1)
+    const m = createOpponentModel({ kind: 'player' }, { rules: reverse, excludeCards: [shown] })
+    for (let t = 0; t < 300; t++) {
+      for (const c of m.draw(4, rnd)) {
+        expect(starOf(c)).toBe(1)
+        expect(cardSignature(c)).not.toBe(cardSignature(shown))
+      }
+    }
+  })
+
+  it('亮出的最高是 2★ → 從 1★~2★ 抽（兩種星級都會出現）', () => {
+    const m = createOpponentModel(
+      { kind: 'player' },
+      { rules: reverse, excludeCards: [ofStar(1), ofStar(2)] },
+    )
+    const seen = new Set<number>()
+    for (let t = 0; t < 300; t++) for (const c of m.draw(3, rnd)) seen.add(starOf(c))
+    expect([...seen].sort()).toEqual([1, 2])
+  })
+
+  it('亮出過 3★ 以上 → 對手沒換牌，候選與沒有逆轉時完全相同', () => {
+    for (const s of [3, 4, 5]) {
+      const ctx = { excludeCards: [ofStar(1), ofStar(s)] }
+      const normal = createOpponentModel({ kind: 'player' }, ctx)
+      const rev = createOpponentModel({ kind: 'player' }, { ...ctx, rules: reverse })
+      expect(ids(rev.candidates)).toEqual(ids(normal.candidates))
+    }
+  })
+
+  it('沒有逆轉 → 傳不傳規則都一樣', () => {
+    const normal = createOpponentModel({ kind: 'player' })
+    const withRules = createOpponentModel(
+      { kind: 'player' },
+      { rules: { ...reverse, reverse: false, same: true, plus: true } },
+    )
+    expect(ids(withRules.candidates)).toEqual(ids(normal.candidates))
+  })
+
+  it('NPC 與選拔模型不受逆轉影響', () => {
+    const npcId = NPC_DECKS[0]!.id
+    for (const spec of [{ kind: 'npc', npcId }, { kind: 'draft' }] as const) {
+      const a = createOpponentModel(spec)
+      const b = createOpponentModel(spec, { rules: reverse })
+      expect(ids(b.candidates)).toEqual(ids(a.candidates))
+    }
+  })
+})

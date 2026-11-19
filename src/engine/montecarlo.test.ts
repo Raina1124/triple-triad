@@ -6,7 +6,14 @@
 // ============================================================
 
 import { describe, expect, it } from 'vitest'
-import { CARD_POOL, makeEstimateCard } from './card-pool'
+import {
+  CARD_POOL,
+  REVERSE_ESTIMATE_EDGE,
+  STRONG_EDGE,
+  estimateCardWithEdge,
+  estimateDisplayEdge,
+  makeEstimateCard,
+} from './card-pool'
 import { applyMove, getLegalMoves, isGameOver } from './game'
 import {
   dedupMoves,
@@ -241,22 +248,61 @@ describe('findBestMoveMonteCarlo（改法 B）', () => {
     expect(hand.some((c) => c.id === mc.move!.cardId)).toBe(true)
   })
 
-  it('深盤面（空格 ≥ 8）：estimate 模式，分數 = 估計卡精確搜尋', { timeout: 30000 }, () => {
-    // 空盤精確搜尋每輪約 0.5~1 秒，輪數放少。
-    for (let t = 0; t < 3; t++) {
-      const s = randomState(0, 0)
-      const opp = s.turn === 'RED' ? s.blueHand : s.redHand
-      for (let i = 0; i < 5; i++) opp[i] = makeUnknown(i)
-      const mc = findBestMoveMonteCarlo(s, { rng: rnd })
-      const est: GameState = {
-        ...s,
-        redHand: s.redHand.map((c) => (c.unknown ? makeEstimateCard(c.id) : c)),
-        blueHand: s.blueHand.map((c) => (c.unknown ? makeEstimateCard(c.id) : c)),
+  it(
+    '深盤面（空格 ≥ 8）：estimate 模式，著手用估計卡選、分數用顯示邊值重算',
+    { timeout: 60000 },
+    () => {
+      // 空盤精確搜尋每輪約 0.5~1 秒，輪數放少。
+      for (let t = 0; t < 3; t++) {
+        const s = randomState(0, 0)
+        const opp = s.turn === 'RED' ? s.blueHand : s.redHand
+        for (let i = 0; i < 5; i++) opp[i] = makeUnknown(i)
+        const mc = findBestMoveMonteCarlo(s, { rng: rnd })
+        const withEdge = (edge: number): GameState => ({
+          ...s,
+          redHand: s.redHand.map((c) => (c.unknown ? estimateCardWithEdge(c.id, edge) : c)),
+          blueHand: s.blueHand.map((c) => (c.unknown ? estimateCardWithEdge(c.id, edge) : c)),
+        })
+        const pick = findBestMoveTieBreak(
+          withEdge(s.rules.reverse ? REVERSE_ESTIMATE_EDGE : STRONG_EDGE),
+        )
+        expect(mc.mode).toBe('estimate')
+        expect(mc.samples).toBe(0)
+        expect(mc.move).toEqual(pick.move)
+        expect(mc.score).toBe(
+          evaluateState(applyMove(withEdge(estimateDisplayEdge(s.rules)), pick.move!)),
+        )
       }
-      expect(mc.mode).toBe('estimate')
-      expect(mc.samples).toBe(0)
-      expect(mc.score).toBe(findBestMove(est).score)
+    },
+  )
+
+  it('顯示邊值：無規則 7、同數或加算 8、逆轉沿用選著手的邊值', () => {
+    expect(estimateDisplayEdge(baseRules())).toBe(7)
+    expect(estimateDisplayEdge({ ...baseRules(), same: true })).toBe(8)
+    expect(estimateDisplayEdge({ ...baseRules(), plus: true })).toBe(8)
+    expect(estimateDisplayEdge({ ...baseRules(), reverse: true })).toBe(REVERSE_ESTIMATE_EDGE)
+    expect(estimateDisplayEdge({ ...baseRules(), reverse: true, same: true })).toBe(
+      REVERSE_ESTIMATE_EDGE,
+    )
+  })
+
+  it('逆轉規則：估計卡改用 REVERSE_ESTIMATE_EDGE', { timeout: 30000 }, () => {
+    const s: GameState = {
+      board: Array.from({ length: 9 }, () => ({ card: null, owner: null })),
+      redHand: pick5(0),
+      blueHand: [0, 1, 2, 3, 4].map(makeUnknown),
+      turn: 'RED',
+      rules: { ...baseRules(), reverse: true },
     }
+    expect(makeEstimateCard(-1, true).edges.top).toBe(REVERSE_ESTIMATE_EDGE)
+    expect(REVERSE_ESTIMATE_EDGE).not.toBe(STRONG_EDGE)
+    const mc = findBestMoveMonteCarlo(s, { rng: rnd })
+    const est: GameState = {
+      ...s,
+      blueHand: s.blueHand.map((c) => makeEstimateCard(c.id, true)),
+    }
+    expect(mc.mode).toBe('estimate')
+    expect(mc.score).toBe(findBestMove(est).score)
   })
 
   it('淺盤面（空格 ≤ 7）＋未知卡：sampled 模式，至少 1 個樣本，建議合法', () => {

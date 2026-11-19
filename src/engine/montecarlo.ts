@@ -14,7 +14,8 @@
 //
 //   【estimate 估計卡】空格 ≥ 8 時：
 //     單一樣本的全根評分實測即需 1~13 秒，抽樣統計無意義。
-//     退回原本做法：未知卡全換成估計卡（四邊 STRONG_EDGE）做精確搜尋。
+//     退回原本做法：未知卡全換成估計卡（四邊 STRONG_EDGE；逆轉規則下改用
+//     REVERSE_ESTIMATE_EDGE，見 card-pool.ts）做精確搜尋。
 //     搜尋端的走法去重（minimax 改法 A）讓多張同內容估計卡只展開一次，
 //     此情境下實測快約 7 倍，深盤面反而是估計卡最高效的地方。
 //
@@ -34,7 +35,12 @@
 
 import { applyMove, getLegalMoves, isGameOver } from './game'
 import { evaluateState, findBestMoveTieBreak } from './minimax'
-import { makeEstimateCard } from './card-pool'
+import {
+  REVERSE_ESTIMATE_EDGE,
+  STRONG_EDGE,
+  estimateCardWithEdge,
+  estimateDisplayEdge,
+} from './card-pool'
 import { createOpponentModel } from './opponent-model'
 import type { OpponentModel, OpponentModelSpec } from './opponent-model'
 import type { Card, GameState, Move } from './types'
@@ -99,6 +105,7 @@ export function findBestMoveMonteCarlo(
   const model: OpponentModel = createOpponentModel(opts.opponent ?? { kind: 'uniform' }, {
     pool: opts.pool,
     excludeCards: opts.excludeCards,
+    rules: state.rules,
   })
 
   const empties = state.board.filter((c) => c.card === null).length
@@ -106,18 +113,32 @@ export function findBestMoveMonteCarlo(
 
   // 深盤面：estimate 模式（未知卡 → 估計卡，精確搜尋）。
   if (empties > sampledMaxEmpties) {
-    const sub = (hand: Card[]): Card[] => hand.map((c) => (c.unknown ? makeEstimateCard(c.id) : c))
-    const est: GameState = {
-      board: state.board,
-      redHand: sub(state.redHand),
-      blueHand: sub(state.blueHand),
-      turn: state.turn,
-      rules: state.rules,
+    const withEstimates = (make: (id: number) => Card): GameState => {
+      const sub = (hand: Card[]): Card[] => hand.map((c) => (c.unknown ? make(c.id) : c))
+      return {
+        board: state.board,
+        redHand: sub(state.redHand),
+        blueHand: sub(state.blueHand),
+        turn: state.turn,
+        rules: state.rules,
+      }
     }
-    const r = exactSearch(est, opts.restrictToCardId)
+    const pickEdge = state.rules.reverse ? REVERSE_ESTIMATE_EDGE : STRONG_EDGE
+    const r = exactSearch(
+      withEstimates((id) => estimateCardWithEdge(id, pickEdge)),
+      opts.restrictToCardId,
+    )
+    // 著手照上面的選；顯示的分數換一個比較準的邊值重算（見 card-pool.ts 的
+    // estimateDisplayEdge）。一樣是精確搜尋，只是對手的估計牌換了數值。
+    let score = r.score
+    const displayEdge = estimateDisplayEdge(state.rules)
+    if (r.move && displayEdge !== pickEdge) {
+      const display = withEstimates((id) => estimateCardWithEdge(id, displayEdge))
+      score = evaluateState(applyMove(display, r.move))
+    }
     return {
       move: r.move,
-      score: r.score,
+      score,
       samples: 0,
       mode: 'estimate',
       candidates: model.candidates.length,
@@ -163,7 +184,7 @@ export function findBestMoveMonteCarlo(
   }
 
   // ---------- 抽樣主迴圈 ----------
-  const sums = new Array<number>(rootMoves.length).fill(0)
+  const sums = rootMoves.map(() => 0)
   const start = Date.now()
   let n = 0
 

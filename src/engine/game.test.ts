@@ -125,13 +125,13 @@ describe('applyMove — 行為', () => {
 
   it('出不存在的卡會丟錯', () => {
     const state = makeState([makeCard(1, 5, 5, 5, 5)], [])
-    expect(() => applyMove(state, { cardId: 999, cellIndex: 0 })).toThrow()
+    expect(() => applyMove(state, { cardId: 999, cellIndex: 0 })).toThrow('手牌中找不到卡')
   })
 
   it('放到已占用的格子會丟錯', () => {
     const state = makeState([makeCard(1, 5, 5, 5, 5)], [])
     state.board[0] = { card: makeCard(2, 1, 1, 1, 1), owner: 'BLUE' }
-    expect(() => applyMove(state, { cardId: 1, cellIndex: 0 })).toThrow()
+    expect(() => applyMove(state, { cardId: 1, cellIndex: 0 })).toThrow('已經有卡')
   })
 })
 

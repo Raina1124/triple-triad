@@ -13,6 +13,7 @@
 //             抽樣空間從 470 塌縮到約 5~10 張。
 //   player  — 玩家牌組：星級上限照遊戲規則 ＋ 填充位假設為有競爭力的 3★。
 //             兩者必須並用，只加合法性約束會讓結果更糟（見下方註解）。
+//             逆轉規則下「有競爭力」的方向相反，另有一套假設（見 ReversePlayerModel）。
 //   draft   — 錦標賽「選拔」規則：牌由主辦方提供，每個星級各一張。
 //             已亮出的牌佔掉自己的星級，未知牌必為其餘星級各一張。
 //
@@ -21,7 +22,7 @@
 // 結果比全域 STRONG_EDGE 更差（見 montecarlo.ts 的註解），已放棄該方向。
 // ============================================================
 
-import type { Card } from './types'
+import type { Card, Rules } from './types'
 import { CARD_POOL } from './card-pool'
 import { getNpcDeck } from './npc-decks'
 
@@ -37,6 +38,9 @@ export interface OpponentModelContext {
   pool?: Card[]
   // 對手已亮出的牌（牌組記憶 ＋ 手牌中已填值的卡）。用內容簽名比對排除。
   excludeCards?: Card[]
+  // 本局規則。目前只有 player 模型會看（逆轉下強牌的方向相反）；
+  // 不傳＝當作沒有特殊規則。
+  rules?: Rules
 }
 
 export interface OpponentModel {
@@ -74,6 +78,19 @@ function takeDistinct(source: Card[], k: number, rng: () => number, idx: number[
 
 function makeIdx(source: Card[]): number[] {
   return source.map((_, i) => i)
+}
+
+// 就地洗牌（Fisher-Yates）。抽出的牌會依序填進對手的未知槽，而秩序規則只能
+// 出手牌第一張——如果回傳順序有規律（例如高星永遠排前面），引擎就會認定
+// 對手一定先出那張。我們不知道對手手牌的實際排列，所以順序一律打散。
+function shuffle(cards: Card[], rng: () => number): Card[] {
+  for (let i = cards.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1))
+    const t = cards[i]!
+    cards[i] = cards[j]!
+    cards[j] = t
+  }
+  return cards
 }
 
 // 已亮出牌的真正星級：手動填值的卡 stars 可能是佔位值，
@@ -137,7 +154,7 @@ class NpcModel implements OpponentModel {
       rng,
       this.varIdx,
     )
-    return padTo([...this.fixedRemaining, ...rest], n, this.fallback, rng)
+    return shuffle(padTo([...this.fixedRemaining, ...rest], n, this.fallback, rng), rng)
   }
 }
 
@@ -212,7 +229,53 @@ class PlayerModel implements OpponentModel {
       ...takeDistinct(this.pool4, four, rng, this.idx4),
     ]
     const fillers = takeDistinct(this.fillerPool, n - out.length, rng, this.idxFill)
-    return padTo([...out, ...fillers], n, this.fallback, rng)
+    return shuffle(padTo([...out, ...fillers], n, this.fallback, rng), rng)
+  }
+}
+
+// ---------- player（逆轉規則）：對手有針對逆轉組牌 ----------
+// 逆轉下數字小的贏，牌的強弱整個倒過來。上面 PlayerModel 假設的「5★＋4★＋
+// 強 3★」在逆轉下反而是最弱的一類牌組，拿它當對手，建議會嚴重偏樂觀。
+//
+// 逆轉下什麼牌組才強，用引擎實測（完全資訊、雙方最佳應對、先後手各一局，
+// 每組 24 對隨機牌組的平均終局分差）：
+//   五張 1★ 對 PlayerModel 抽出的牌組  +2.83（全勝）
+//   五張 1★ 對 五張 2★                 +2.00
+//   五張 1★ 對 五張 3★                 +2.25
+// 各星級的四邊總和幾乎不重疊（1★ 12~15、2★ 16~21、3★ 20~25…），
+// 所以「逆轉下有競爭力的牌組」就是全 1★，而且 1★ 不受牌組星級上限限制。
+//
+// 對手不一定有針對逆轉換牌（規則是隨機抽到的、或他只有一副牌），
+// 換了也不一定換到全 1★。這點不用猜，看他已經亮出的牌：
+//   還沒亮牌、或亮出的全是 1★ → 未知牌從 1★ 抽（當作對手組得最好）。
+//   亮出的最高是 2★           → 未知牌從 1★~2★ 抽。
+//   亮出過 3★ 以上            → 他帶的是平常的牌組，走上面的 PlayerModel。
+// 抽樣模式一定是在對手至少出過一張牌之後才會用到（空格 ≤ 7），
+// 所以實際上幾乎都有牌可看。
+//
+// 成對量測（逆轉、空格 6、每組 80 個局面、我方全 1★、同一批局面比新舊模型；
+// 代價＝建議著手比真正最佳手少拿幾張卡，高估＝引擎自報分數減實際結果）：
+//   對手全 1★       代價 0.500 → 0.275（差 0.23 ± 0.12），高估 +2.50 → −0.13
+//   對手 1★~2★ 混搭 代價 0.475 → 0.425（差 0.05 ± 0.09），高估 +1.63 → −0.12
+//   對手全 2★       代價 0.375 → 0.450（差 −0.07 ± 0.08），高估 +0.98 → −0.42
+//   對手用平常牌組   亮出 3★ 以上即走原模型，結果與改動前完全相同
+// 也就是：著手品質只有對上全 1★ 的對手時明顯變好，其餘在雜訊範圍內；
+// 主要的改善是自報分數不再大幅偏樂觀。
+// 試過「有換牌就一律從 1★ 抽」：對上全 2★ 的對手，代價由 0.375 升到 0.550
+// （把對手想得太強），所以改成跟著亮出的星級走。
+const REVERSE_ADAPTED_MAX_STAR = 2 // 亮出的牌都不超過這個星級，才當作有換牌
+
+class ReversePlayerModel implements OpponentModel {
+  readonly kind = 'player' as const
+  private idx: number[]
+  constructor(
+    readonly candidates: Card[],
+    private fallback: Card[],
+  ) {
+    this.idx = makeIdx(candidates)
+  }
+  draw(n: number, rng: () => number): Card[] {
+    return padTo(takeDistinct(this.candidates, n, rng, this.idx), n, this.fallback, rng)
   }
 }
 
@@ -278,9 +341,15 @@ export function createOpponentModel(
   }
 
   if (spec.kind === 'player') {
+    const shownStars = revealedStars(pool, ctx.excludeCards ?? [])
+    if (ctx.rules?.reverse && shownStars.every((s) => s <= REVERSE_ADAPTED_MAX_STAR)) {
+      const maxStar = Math.max(1, ...shownStars)
+      const low = remaining.filter((c) => c.stars <= maxStar)
+      if (low.length > 0) return new ReversePlayerModel(low, remaining)
+    }
     let revealedFive = 0
     let revealedFour = 0
-    for (const s of revealedStars(pool, ctx.excludeCards ?? [])) {
+    for (const s of shownStars) {
       if (s === 5) revealedFive++
       else if (s === 4) revealedFour++
     }

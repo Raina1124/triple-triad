@@ -4,16 +4,20 @@
 // 職責：持有所有狀態、呼叫引擎、組合展示型子元件。
 // 展示細節都在子元件：CardView / HandPanel / BoardCell / RuleBar。
 // ============================================================
-import { ref, computed, reactive, onMounted } from 'vue'
+import { ref, computed, reactive, onMounted, watch } from 'vue'
 import type { Board, Cell, GameState, Player, Rules, Card, EdgeValue, Edges } from './engine/types'
 import { CARD_POOL } from './engine/card-pool'
 import { applyMove, getWinner, isGameOver } from './engine/game'
 import { effectiveEdges } from './engine/flip'
-import { findBestMoveMonteCarlo } from './engine/montecarlo'
 import type { MonteCarloResult } from './engine/montecarlo'
+import type { SuggestRequest } from './engine/suggest.worker'
 import { NPC_DECKS } from './engine/npc-decks'
 import { NPC_NAMES_ZH } from './engine/npc-zh'
 import type { OpponentModelSpec } from './engine/opponent-model'
+import { recordPlacement, undoPlacement } from './history'
+import type { PlacementRecord } from './history'
+import { STORAGE_KEY, firstFreeUnknownId, parseSaved, serializeState } from './storage'
+import type { MyDeckSlot, OppDeckSlot, OppKind, SavedState } from './storage'
 import HandPanel from './components/HandPanel.vue'
 import BoardCell from './components/BoardCell.vue'
 import RuleBar from './components/RuleBar.vue'
@@ -61,7 +65,7 @@ function emptyBoard(): Board {
 }
 
 // ---------- 規則 ----------
-// 定義在發牌之前，因為發牌要讀明牌規則（threeOpen/allOpen）。
+// 定義在發牌之前，因為下面「讀回上次的設定」要先有規則的預設值。
 const rules = reactive<Rules>({
   same: false,
   plus: false,
@@ -77,17 +81,29 @@ const rules = reactive<Rules>({
   swap: false,
 })
 
+// ---------- 讀回上次的牌組與設定 ----------
+// 牌組、牌組槽、座位、先手、規則、對手設定會存在 localStorage（見 storage.ts，
+// 寫入在下方「自動保存」）。這裡在發牌之前讀回來，下面各個狀態用它當初始值；
+// 沒存過或存檔不合用時 saved 是 null，全部走預設值。
+// 瀏覽器禁用儲存時 localStorage 會丟例外，那就當作沒存過。
+let saved: SavedState | null = null
+try {
+  saved = parseSaved(localStorage.getItem(STORAGE_KEY), { ...rules })
+} catch {}
+if (saved) Object.assign(rules, saved.rules)
+
 // ---------- 開局設定狀態 ----------
 // 「我方顏色」與「先後手」是兩件獨立的事：
 //   - mySide：我方是紅還是藍（影響視覺強調、發牌時哪方是對手）。
 //   - firstPlayer：開局誰先下。
 // 定義在發牌之前，因為 dealHand 要讀 mySide 判斷哪方發未知卡。
-const mySide = ref<Player>('RED')
-const firstPlayer = ref<Player>('RED')
+const mySide = ref<Player>(saved?.mySide ?? 'RED')
+const firstPlayer = ref<Player>(saved?.firstPlayer ?? 'RED')
 
 // 產生一張未知卡（對手尚未揭曉的牌）。
 // 給一個佔位數值，但標記 unknown，顯示時會畫成問號。
-let unknownIdCounter = -1 // 用負數 id 避免跟真實卡撞號
+// 用負數 id 避免跟真實卡撞號；起點排在存檔裡既有 id 的下面（見 firstFreeUnknownId）。
+let unknownIdCounter = firstFreeUnknownId(saved)
 function makeUnknownCard(): Card {
   return {
     id: unknownIdCounter--,
@@ -98,20 +114,16 @@ function makeUnknownCard(): Card {
   }
 }
 
-// 我方預設手牌（佔位，之後用搜尋換成真實牌）。
-function myDefaultHand(): Card[] {
-  return CARD_POOL.slice(0, 5).map((c) => ({ ...c }))
-}
-
 // 對手牌組記憶（持久，重置不清空，可被「洗掉對手牌」清空）。
 // 5 格，每格：已填過的卡 or null（還沒填過）。
 // 同一個 NPC 打多次時，填過的牌會被記住。
-const oppDeck = ref<(Card | null)[]>([null, null, null, null, null])
+const oppDeck = ref<(Card | null)[]>(saved?.oppDeck ?? [null, null, null, null, null])
 
 // 對手手牌：有牌組記憶的格用記憶，其餘全部未知（不鎖死位置）。
 // 三明牌/全明牌規則下，哪幾張公開是隨機的，所以開局全未知，
 // 由你自由點任一張未知卡填入實際公開的數值（不限位置、不限時機）。
-// 明牌規則只作為搜尋估計的提示（見 buildEstimateState）。
+// 明牌規則在引擎裡沒有作用：公開的牌填進去就是已知卡，搜尋自然會用到；
+// 規則列上的開關只是讓畫面與 NPC 的規則一致。
 function opponentHand(): Card[] {
   const hand: Card[] = []
   for (let i = 0; i < 5; i++) {
@@ -135,7 +147,7 @@ function dealHand(player: Player): Card[] {
 // 我方 5 張是長期固定牌組，重打不該重輸入。
 // myDeck 存當前數值；重發時複製一份給手牌（手牌會在對局中被消耗，
 // 不能直接動到牌組本身）。編輯我方手牌時會同步更新回 myDeck。
-const myDeck = ref<Card[]>(CARD_POOL.slice(0, 5).map((c) => ({ ...c })))
+const myDeck = ref<Card[]>(saved?.myDeck ?? CARD_POOL.slice(0, 5).map((c) => ({ ...c })))
 
 // 複製一份牌組給手牌使用（深複製卡物件，避免對局消耗影響牌組）。
 function myDeckCopy(): Card[] {
@@ -143,7 +155,7 @@ function myDeckCopy(): Card[] {
 }
 
 // 洗掉對手牌：清空對手牌組記憶，重發牌局（我方牌組保留）。
-// 換 NPC 時用，讓對手變回未知（依明牌規則）。
+// 換對手時用，讓對手的牌變回未知。
 function clearOppDeck() {
   oppDeck.value = [null, null, null, null, null]
   resetBoard()
@@ -156,8 +168,8 @@ function clearOppDeck() {
 //   一般  → 引擎的 player 模型：牌組星級上限照遊戲規則，填充位假設為有競爭力的 3★。
 //   選拔  → 錦標賽選拔規則：1★~5★ 各一張，未知牌必為還沒亮出的星級。
 // 全卡池均勻抽（uniform）分數過度樂觀，UI 不再提供；引擎端仍保留該模型。
-const oppKind = ref<'npc' | 'player' | 'draft'>('player')
-const oppNpcId = ref<number | null>(null)
+const oppKind = ref<OppKind>(saved?.oppKind ?? 'player')
+const oppNpcId = ref<number | null>(saved?.oppNpcId ?? null)
 const npcQuery = ref('')
 
 // NPC 清單：合併 npc-zh.ts 的中文名（沒填的維持 undefined，顯示時退回英文）。
@@ -182,7 +194,7 @@ const selectedNpc = computed(() => npcList.value.find((n) => n.id === oppNpcId.v
 //   2. 換成「另一位」NPC 時清掉對手牌組記憶——留著上一位的牌，NPC 模型的
 //      固定牌會對不上而退化。按 × 後重選同一位、或第一次選 NPC 時保留記憶。
 // 規則變更本來就會重置牌局（見 updateRules），這裡沿用同一條路。
-let lastNpcId: number | null = null
+let lastNpcId: number | null = saved?.lastNpcId ?? null
 function pickNpc(id: number) {
   oppNpcId.value = id
   npcQuery.value = ''
@@ -245,23 +257,45 @@ const npcRuleWarnings = computed(() =>
   (selectedNpc.value?.rules ?? []).flatMap((r) => NPC_RULE_INFO[r]?.warn ?? []),
 )
 
-// ---------- 牌組儲存槽（僅本次網頁工作階段）----------
-// 同一次開網頁打多個 NPC 時，可把目前牌組快照進槽位、之後取回，
-// 不用重新輸入。存在記憶體，重新整理/關閉網頁即消失
-// （localStorage 永久儲存為待辦範圍 B，屆時可直接序列化這兩個陣列）。
-interface MyDeckSlot {
-  name: string
-  deck: Card[] | null
-}
-interface OppDeckSlot {
-  name: string
-  deck: (Card | null)[] | null // 對手牌組可能只填了部分
-}
-
+// ---------- 牌組儲存槽 ----------
+// 打不同對手時，可把目前牌組快照進槽位、之後取回，不用重新輸入。
+// 槽位跟牌組一樣會自動保存，重新整理/關閉網頁後仍在。
 const emptyMySlot = (): MyDeckSlot => ({ name: '', deck: null })
 const emptyOppSlot = (): OppDeckSlot => ({ name: '', deck: null })
-const myDeckSlots = ref<MyDeckSlot[]>([emptyMySlot(), emptyMySlot(), emptyMySlot()])
-const oppDeckSlots = ref<OppDeckSlot[]>([emptyOppSlot(), emptyOppSlot(), emptyOppSlot()])
+const myDeckSlots = ref<MyDeckSlot[]>(
+  saved?.myDeckSlots ?? [emptyMySlot(), emptyMySlot(), emptyMySlot()],
+)
+const oppDeckSlots = ref<OppDeckSlot[]>(
+  saved?.oppDeckSlots ?? [emptyOppSlot(), emptyOppSlot(), emptyOppSlot()],
+)
+
+// ---------- 自動保存 ----------
+// 下列任一項有變就整份重寫一次（資料很小）。deep：槽位名稱是就地改字串，
+// rules 是 reactive 物件。lastNpcId 不是 ref，但它只會跟著 oppNpcId 一起變。
+// 寫入失敗（禁用儲存、空間不足）就略過，不影響使用。
+watch(
+  [myDeck, oppDeck, myDeckSlots, oppDeckSlots, mySide, firstPlayer, rules, oppKind, oppNpcId],
+  () => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        serializeState({
+          myDeck: myDeck.value,
+          oppDeck: oppDeck.value,
+          myDeckSlots: myDeckSlots.value,
+          oppDeckSlots: oppDeckSlots.value,
+          mySide: mySide.value,
+          firstPlayer: firstPlayer.value,
+          rules,
+          oppKind: oppKind.value,
+          oppNpcId: oppNpcId.value,
+          lastNpcId,
+        }),
+      )
+    } catch {}
+  },
+  { deep: true },
+)
 
 const copyCard = (c: Card): Card => ({ ...c, edges: { ...c.edges } })
 
@@ -291,6 +325,11 @@ function loadOppSlot(i: number) {
 // 點我方一張 → 點對手一張 → 互換兩張數值，退出模式。
 const swapMode = ref(false)
 const swapFirstId = ref<number | null>(null) // 已選的我方那張
+// 這一局已互換的兩個槽位（用卡 id 記）。遊戲裡每局只換一張，換過就不再提供
+// 「指定交換」，換錯了按重置牌局重來。重置牌局時清空。
+// 交換後兩張卡的「內容」與「槽位」對不上了：我方槽位裡放的是對手的牌、
+// 對手槽位裡放的是我方的牌。同步牌組記憶與抽樣排除都要看這個對照。
+const swapped = ref<{ myId: number; oppId: number } | null>(null)
 
 function startSwap() {
   swapMode.value = true
@@ -348,9 +387,11 @@ function doSwap(myId: number, oppId: number) {
   swapIn(blueHand.value)
   redHand.value = [...redHand.value]
   blueHand.value = [...blueHand.value]
+  swapped.value = { myId, oppId }
 
   // 注意：交換「不」同步回牌組（myDeck/oppDeck）。
   // 牌組保持交換前的原始牌，這樣重置/關閉交換規則時重發即可還原。
+  // 之後編輯這兩張卡時寫回哪裡，見 syncDeckFromHand。
 }
 
 // ---------- 調換位置（輸入更正 / 秩序規則看順序）----------
@@ -482,6 +523,32 @@ function syncDeckFromHand(cardId: number) {
   const oppHand = oppSide === 'RED' ? redHand.value : blueHand.value
   const oppOrig = oppSide === 'RED' ? redHandOrig.value : blueHandOrig.value
 
+  // 交換過的兩張：內容寫回「它真正的主人」的牌組，不是它現在所在的槽位。
+  //   我方槽位裡那張是對手的牌 → 記進對手牌組（對手原本那一格）。
+  //   對手槽位裡那張是我方的牌 → 記回我方牌組（我方原本那一格）。
+  // 寫回所在槽位的話，重置後我方牌組會被對手的牌蓋掉。
+  const sw = swapped.value
+  if (sw && (cardId === sw.myId || cardId === sw.oppId)) {
+    const inMyHand = cardId === sw.myId
+    const live = (inMyHand ? myHand : oppHand).find((c) => c.id === cardId)
+    if (!live || live.unknown) return
+    const copy = { ...live, edges: { ...live.edges } }
+    if (inMyHand) {
+      const pos = oppOrig.findIndex((c) => c.id === sw.oppId)
+      if (pos === -1) return
+      const deck = [...oppDeck.value]
+      deck[pos] = copy
+      oppDeck.value = deck
+    } else {
+      const pos = myOrig.findIndex((c) => c.id === sw.myId)
+      if (pos === -1) return
+      const deck = [...myDeck.value]
+      deck[pos] = copy
+      myDeck.value = deck
+    }
+    return
+  }
+
   // 我方：同步 myDeck。
   const myPos = myOrig.findIndex((c) => c.id === cardId)
   if (myPos !== -1) {
@@ -523,29 +590,13 @@ function redeal() {
   blueHandOrig.value = [...blueHand.value]
 }
 
-const turn = ref<Player>('RED')
+const turn = ref<Player>(firstPlayer.value)
 
 // ---------- 開局設定 ----------
 // 「我方顏色」與「先後手」是兩件獨立的事：
 //   - mySide：我方是紅還是藍（影響視覺強調與「建議最佳手」幫誰算）。
-//   - 先後手：由開局誰先下決定，存在 turn 的初始值裡。
-// 後手 = 對手先下第一張。
-
-// 設定開局：指定我方顏色與我方是否先手，據此決定誰先下。
-function setupGame(side: Player, iGoFirst: boolean) {
-  mySide.value = side
-  const opponent: Player = side === 'RED' ? 'BLUE' : 'RED'
-  // 我先手 → 我方顏色先下；我後手 → 對手先下。
-  const first: Player = iGoFirst ? side : opponent
-  turn.value = first
-  firstPlayer.value = first // 記住先手方，供重置沿用
-  // 重新發牌、清空棋盤。
-  board.value = emptyBoard()
-  redeal()
-  selectedCardId.value = null
-  suggestedCell.value = null
-  suggestionText.value = ''
-}
+//   - firstPlayer：開局誰先下；重置牌局時 turn 從它開始。
+// 兩者各自用下面的 setMySide / setFirst 設定。
 
 // 只改「我方座位」，先手方維持不變（兩者獨立），並重置牌局。
 function setMySide(side: Player) {
@@ -566,17 +617,18 @@ function resetBoard() {
   board.value = emptyBoard()
   redeal()
   turn.value = firstPlayer.value
+  history.value = []
   selectedCardId.value = null
   suggestedCell.value = null
   suggestionText.value = ''
   // 重置時退出交換模式（被換走的卡已隨重發還原）。
   swapMode.value = false
   swapFirstId.value = null
+  swapped.value = null
 }
 
 function updateRules(next: Rules) {
   // 任何規則改變都重置牌局：
-  //   - 明牌規則影響對手未知卡數量（需重發牌）。
   //   - 其他規則（如同類強化/弱化）影響盤面數值計算，重置最單純一致。
   //   - 交換規則的牌組未污染，重發即還原被換走的卡。
   const swapTurnedOff = rules.swap && !next.swap
@@ -809,6 +861,8 @@ function placeCard(cellIndex: number) {
 
 // 實際落子（數值已確定）。
 function doPlace(cellIndex: number, cardId: number) {
+  // 落子前先記下收回這一手所需的資訊（見 history.ts）。
+  history.value.push(recordPlacement(board.value, turn.value, cardId))
   const next = applyMove(buildState(), { cardId, cellIndex })
 
   board.value = next.board
@@ -819,6 +873,37 @@ function doPlace(cellIndex: number, cardId: number) {
   selectedCardId.value = null
   suggestedCell.value = null
   suggestionText.value = ''
+}
+
+// ---------- 上一步 ----------
+// 收回最後一手落子：那張卡回到手牌、被它翻掉的卡翻回去、換回該方出牌。
+// 可以連按，一路退回開局；重置牌局時清空。
+// 落子之後做過的修正（改數值、調換位置）會留著，細節見 history.ts。
+const history = ref<PlacementRecord[]>([])
+
+function undoMove() {
+  const record = history.value[history.value.length - 1]
+  if (!record) return
+  const prev = undoPlacement(
+    record,
+    board.value,
+    redHand.value,
+    blueHand.value,
+    redHandOrig.value,
+    blueHandOrig.value,
+  )
+  if (!prev) return
+  history.value.pop()
+
+  board.value = prev.board
+  redHand.value = prev.redHand
+  blueHand.value = prev.blueHand
+  turn.value = record.player
+
+  selectedCardId.value = null
+  suggestedCell.value = null
+  suggestionText.value = ''
+  moveFirst.value = null // 調換模式若已選了第一格，那一格可能剛被清空
 }
 
 // ---------- 建議最佳手 ----------
@@ -859,6 +944,19 @@ function openingKey(): string {
   })
 }
 
+// ---------- 推演 Worker ----------
+// 搜尋跑在 Web Worker（engine/suggest.worker.ts），推演期間畫面照常可操作。
+// Worker 建一次後留著重複使用；取消時直接 terminate，下次要算再重建。
+let suggestWorker: Worker | null = null
+
+// 取消進行中的推演。被 terminate 的 Worker 不會再回訊息，所以不會有過期結果。
+function cancelSuggest() {
+  if (!thinking.value) return
+  suggestWorker?.terminate()
+  suggestWorker = null
+  thinking.value = false
+}
+
 function suggestBest() {
   if (isGameOver(buildState())) {
     suggestionText.value = '對局已結束'
@@ -873,80 +971,127 @@ function suggestBest() {
     return
   }
 
-  thinking.value = true
   suggestedCell.value = null
 
-  setTimeout(() => {
-    // 有未知卡：蒙地卡羅抽樣（從真實卡池抽對手可能的牌，跨樣本平均選最穩落點；
-    // 深盤面搜尋過重時自動退回估計卡精確搜尋）。無未知卡：內部直接走精確搜尋。
-    // 排除「對手已亮出的牌」不參與抽樣：牌組記憶 + 對手手牌中已填值的卡
-    // （後者涵蓋交換不寫回牌組的情況）。同副牌組不會有重複卡。
-    const oppHandNow = mySide.value === 'RED' ? blueHand.value : redHand.value
-    const excludeCards = [
-      ...oppDeck.value.filter((c): c is Card => c !== null),
-      ...oppHandNow.filter((c) => !c.unknown),
-    ]
-    // 空盤（開局第一手）且非混亂：查/寫開局快取。
-    const boardEmpty = board.value.every((c) => c.card === null)
-    const cacheKey = boardEmpty && chaosCardId === null ? openingKey() : null
-    const cached = cacheKey !== null ? openingCache.get(cacheKey) : undefined
-    let result: MonteCarloResult
-    if (cached) {
-      // 命中：把「手牌位置索引」換算回當局的卡 id。空盤時手牌必為滿 5 張。
-      result = {
+  // 空盤（開局第一手）且非混亂：查/寫開局快取。
+  const boardEmpty = board.value.every((c) => c.card === null)
+  const cacheKey = boardEmpty && chaosCardId === null ? openingKey() : null
+  const cached = cacheKey !== null ? openingCache.get(cacheKey) : undefined
+  if (cached) {
+    // 命中：把「手牌位置索引」換算回當局的卡 id。空盤時手牌必為滿 5 張。
+    showSuggestion(
+      {
         move: { cardId: currentHand()[cached.handIndex]!.id, cellIndex: cached.cellIndex },
         score: cached.score,
         samples: cached.samples,
         mode: cached.mode,
         candidates: cached.candidates,
-      }
-    } else {
-      result = findBestMoveMonteCarlo(buildState(), {
+      },
+      chaosCardId,
+    )
+    return
+  }
+
+  // 有未知卡：蒙地卡羅抽樣（從真實卡池抽對手可能的牌，跨樣本平均選最穩落點；
+  // 深盤面搜尋過重時自動退回估計卡精確搜尋）。無未知卡：內部直接走精確搜尋。
+  // 排除「對手已亮出的牌」不參與抽樣：牌組記憶 + 對手手牌中已填值的卡。
+  // 同副牌組不會有重複卡。交換過的話要換個角度看：對手槽位裡那張是我方換過去的
+  // 牌，不是對手牌組的牌（算進去會讓「一般」模型誤以為對手亮出了我方的星級）；
+  // 我方槽位裡那張才是對手的牌。
+  const oppHandNow = mySide.value === 'RED' ? blueHand.value : redHand.value
+  const myHandNow = mySide.value === 'RED' ? redHand.value : blueHand.value
+  const sw = swapped.value
+  const fromOppDeck = [
+    ...oppHandNow.filter((c) => c.id !== sw?.oppId),
+    ...myHandNow.filter((c) => c.id === sw?.myId),
+  ]
+  const excludeCards = [
+    ...oppDeck.value.filter((c): c is Card => c !== null),
+    ...fromOppDeck.filter((c) => !c.unknown),
+  ]
+  // 局面是 Vue 的 reactive 代理，不能直接 postMessage；用 JSON 複製成純資料
+  // （內容只有數字、字串、布林，複製不失真）。Worker 端拿到的是普通物件，
+  // 搜尋也不必再穿過代理讀值。
+  const request: SuggestRequest = JSON.parse(
+    JSON.stringify({
+      state: buildState(),
+      options: {
         excludeCards,
         restrictToCardId: chaosCardId ?? undefined,
         opponent: opponentSpec.value,
-      })
-      if (cacheKey !== null && result.move) {
-        const hi = currentHand().findIndex((c) => c.id === result.move!.cardId)
-        if (hi !== -1) {
-          openingCache.set(cacheKey, {
-            handIndex: hi,
-            cellIndex: result.move.cellIndex,
-            score: result.score,
-            samples: result.samples,
-            mode: result.mode,
-            candidates: result.candidates,
-          })
-        }
+      },
+    }),
+  )
+
+  thinking.value = true
+  if (suggestWorker === null) {
+    suggestWorker = new Worker(new URL('./engine/suggest.worker.ts', import.meta.url), {
+      type: 'module',
+    })
+  }
+  // 推演期間只要局面有變就會被取消（見下方 watch），
+  // 所以結果回來時的局面必定等於送出時的局面。
+  suggestWorker.onmessage = (e: MessageEvent<MonteCarloResult>) => {
+    const result = e.data
+    if (cacheKey !== null && result.move) {
+      const hi = currentHand().findIndex((c) => c.id === result.move!.cardId)
+      if (hi !== -1) {
+        openingCache.set(cacheKey, {
+          handIndex: hi,
+          cellIndex: result.move.cellIndex,
+          score: result.score,
+          samples: result.samples,
+          mode: result.mode,
+          candidates: result.candidates,
+        })
       }
     }
-    if (result.move) {
-      suggestedCell.value = result.move.cellIndex
-      selectedCardId.value = result.move.cardId
-      const card = currentHand().find((c) => c.id === result.move!.cardId)
-      // 分數是紅視角；換算成「我方視角」更直覺。
-      const myScore = mySide.value === 'RED' ? result.score : -result.score
-      const sign = myScore > 0 ? '我方優' : myScore < 0 ? '對手優' : '均勢'
-      // 標示這手是幫誰算的（輪到對手時，等於預測對手最佳應對）。
-      const forWho = turn.value === mySide.value ? '我方' : '對手'
-      // 依計算模式標註：抽樣平均（分數可能非整數）／估計卡／精確（不標）。
-      // 候選數＝對手未知牌還剩幾種可能。數字小＝推論收得緊＝這個分數可信；
-      // 一般模型時約兩百張，NPC 模型時只有個位數。
-      const candNote = result.mode === 'exact' ? '' : `，對手候選 ${result.candidates} 張`
-      const modeNote =
-        result.mode === 'sampled'
-          ? `（蒙地卡羅 ${result.samples} 樣本平均${candNote}）`
-          : result.mode === 'estimate'
-            ? `（估計${candNote}）`
-            : ''
-      const chaosNote = chaosCardId !== null ? '【混亂：僅算指定牌落點】' : ''
-      const scoreText = Number.isInteger(myScore) ? `${myScore}` : myScore.toFixed(2)
-      suggestionText.value =
-        `${chaosNote}（${forWho}）建議出「${card?.name ?? '?'}」→ ${describeCell(result.move.cellIndex)}` +
-        `　預期終局 ${myScore >= 0 ? '+' : ''}${scoreText}（${sign}）${modeNote}`
-    }
+    showSuggestion(result, chaosCardId)
     thinking.value = false
-  }, 20)
+  }
+  // Worker 載入失敗（例如網路中斷抓不到檔案）或搜尋丟出例外：
+  // 收掉這個 Worker、解除「推演中」，不要讓按鈕卡死。
+  suggestWorker.onerror = () => {
+    cancelSuggest()
+    suggestionText.value = '推演失敗，請再按一次「建議最佳手」'
+  }
+  suggestWorker.postMessage(request)
+}
+
+// 推演的輸入一變，進行中的推演就作廢：落子、編輯、調換、重置、換規則
+// 都會換掉這幾個 ref；切換對手牌組模型會改 opponentSpec；混亂規則下
+// 「選了哪張牌」也是輸入。顯示建議時只動選取與高亮，不會觸發這裡。
+watch(
+  [board, redHand, blueHand, turn, opponentSpec, () => (rules.chaos ? selectedCardId.value : null)],
+  cancelSuggest,
+)
+
+// 把搜尋結果顯示出來：選起建議的牌、高亮建議的格子、寫出說明文字。
+function showSuggestion(result: MonteCarloResult, chaosCardId: number | null) {
+  if (!result.move) return
+  suggestedCell.value = result.move.cellIndex
+  selectedCardId.value = result.move.cardId
+  const card = currentHand().find((c) => c.id === result.move!.cardId)
+  // 分數是紅視角；換算成「我方視角」更直覺。
+  const myScore = mySide.value === 'RED' ? result.score : -result.score
+  const sign = myScore > 0 ? '我方優' : myScore < 0 ? '對手優' : '均勢'
+  // 標示這手是幫誰算的（輪到對手時，等於預測對手最佳應對）。
+  const forWho = turn.value === mySide.value ? '我方' : '對手'
+  // 依計算模式標註：抽樣平均（分數可能非整數）／估計卡／精確（不標）。
+  // 候選數＝對手未知牌還剩幾種可能。數字小＝推論收得緊＝這個分數可信；
+  // 一般模型時約兩百張，NPC 模型時只有個位數。
+  const candNote = result.mode === 'exact' ? '' : `，對手候選 ${result.candidates} 張`
+  const modeNote =
+    result.mode === 'sampled'
+      ? `（蒙地卡羅 ${result.samples} 樣本平均${candNote}）`
+      : result.mode === 'estimate'
+        ? `（估計${candNote}）`
+        : ''
+  const chaosNote = chaosCardId !== null ? '【混亂：僅算指定牌落點】' : ''
+  const scoreText = Number.isInteger(myScore) ? `${myScore}` : myScore.toFixed(2)
+  suggestionText.value =
+    `${chaosNote}（${forWho}）建議出「${card?.nameZh ?? card?.name ?? '?'}」→ ${describeCell(result.move.cellIndex)}` +
+    `　預期終局 ${myScore >= 0 ? '+' : ''}${scoreText}（${sign}）${modeNote}`
 }
 
 function describeCell(i: number): string {
@@ -1107,9 +1252,16 @@ function isPlaceable(cell: Cell, index: number): boolean {
           @edit="startEdit"
         />
         <div class="hand-tools">
-          <button v-if="rules.swap && !swapMode && !moveMode" class="swap-btn" @click="startSwap">
+          <button
+            v-if="rules.swap && !swapMode && !moveMode && !swapped"
+            class="swap-btn"
+            @click="startSwap"
+          >
             指定交換
           </button>
+          <div v-if="rules.swap && swapped && !swapMode" class="swap-hint">
+            已交換。換錯了請按「重置牌局」重新指定
+          </div>
           <div v-if="swapMode" class="swap-hint">
             {{ swapFirstId === null ? '① 點我方要換出的牌' : '② 點對手要換進的牌' }}
             <button class="swap-cancel" @click="cancelSwap">取消</button>
@@ -1185,7 +1337,9 @@ function isPlaceable(cell: Cell, index: number): boolean {
                       : '尚未選 NPC，暫時當作一般'
                     : oppKind === 'draft'
                       ? '錦標賽選拔：1★~5★ 各一張，依已亮出的星級推論'
-                      : '依玩家牌組規則限制星級，填充位假設為強 3★'
+                      : rules.reverse
+                        ? '逆轉：假設對手改帶低星牌；他亮出 3★ 以上就改回平常的假設'
+                        : '依玩家牌組規則限制星級，填充位假設為強 3★'
                 }}
               </div>
               <template v-if="oppKind === 'npc'">
@@ -1193,10 +1347,10 @@ function isPlaceable(cell: Cell, index: number): boolean {
               </template>
             </div>
 
-            <!-- 牌組儲存槽（僅本次開啟網頁期間有效，重新整理即消失） -->
+            <!-- 牌組儲存槽（自動保存，重新整理後仍在） -->
             <div class="deck-slots">
               <div class="deck-slots-title">
-                牌組槽<span class="deck-slots-note">（本次開啟有效）</span>
+                牌組槽<span class="deck-slots-note">（自動保存）</span>
               </div>
               <div class="deck-slots-group">
                 <span class="deck-slots-label">我方</span>
@@ -1294,6 +1448,9 @@ function isPlaceable(cell: Cell, index: number): boolean {
             @click="suggestBest"
           >
             {{ thinking ? '推演中…' : '建議最佳手' }}
+          </button>
+          <button class="btn ghost" :disabled="history.length === 0" @click="undoMove">
+            上一步
           </button>
           <button class="btn ghost" @click="reset">重置牌局</button>
         </div>
@@ -1668,9 +1825,13 @@ function isPlaceable(cell: Cell, index: number): boolean {
   background: transparent;
   color: var(--ivory);
 }
-.btn.ghost:hover {
+.btn.ghost:hover:not(:disabled) {
   border-color: var(--ivory);
   background: rgba(255, 255, 255, 0.05);
+}
+.btn.ghost:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .suggestion {
